@@ -1,0 +1,208 @@
+// Prisma schema
+// 参照: https://pris.ly/d/prisma-schema
+//
+// 仕様の出典: docs/features.md / docs/steps/step-2.md
+//
+// 共通規約
+// - 金額はすべて整数円（Int）。小数は使わない
+// - 年月は String の "YYYY-MM" 形式（@db.VarChar(7)）。辞書順ソートが暦順と一致する。
+//   char(7) は末尾を空白で埋めてしまい（"2026-8" → "2026-8 "）JS 側の === 比較が
+//   静かに失敗するため varchar(7) を使う。長さ上限だけを DB で保証し、
+//   "YYYY-MM" という形式そのものの保証はアプリ層の整形ヘルパーの責任とする
+// - 全モデルに createdAt / updatedAt、id は cuid
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  // 部分ユニークインデックス（PaymentSource.isDefault が true の行は最大1件）に必要。
+  // Prisma 7.9.1 では preview feature。
+  previewFeatures = ["partialIndexes"]
+}
+
+// 接続URLは prisma.config.ts の datasource.url が環境変数から読む。
+// Prisma 7 では schema 側の `url = env("DATABASE_URL")` はサポートされない（P1012）。
+datasource db {
+  provider = "postgresql"
+}
+
+/// 払い出し先のタイプ（features.md「払い出し先のタイプは3種類」）
+enum PaymentSourceType {
+  CASH
+  CREDIT_CARD
+  BANK_DEBIT
+}
+
+/// 浪費フラグ（features.md「必要・浪費・投資 の3択」）
+enum WasteTag {
+  NECESSARY
+  WASTE
+  INVESTMENT
+}
+
+/// カテゴリの固定費/変動費属性
+enum CostType {
+  FIXED
+  VARIABLE
+}
+
+/// 払い出し先。支出を「どこから出したか」で管理する軸であり、月次予算の主軸。
+model PaymentSource {
+  id   String            @id @default(cuid())
+  /// 表示名。例「現金」「Aカード」「A銀行 引き落とし」
+  name String            @unique
+  type PaymentSourceType
+
+  /// 並べ替え用
+  sortOrder Int
+  /// 使わなくなったカードの無効化（削除ではない）
+  isActive  Boolean @default(true)
+  /// 入力時の既定の払い出し先。全体で1件のみ true（下の部分ユニークインデックスで強制）
+  isDefault Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses Expense[]
+  budgets  Budget[]
+
+  /// isDefault = true の行は全体で最大1件しか存在できない
+  @@unique([isDefault], where: { isDefault: true })
+}
+
+/// 支出カテゴリ。
+model Category {
+  id       String   @id @default(cuid())
+  name     String   @unique
+  costType CostType
+
+  sortOrder Int
+  /// 非表示（削除ではない）
+  isHidden  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses Expense[]
+  budgets  CategoryBudget[]
+}
+
+/// 支出。date は「支出発生日」。
+/// クレジットカードも締め日・引き落とし日ではなく発生日で計上する
+/// （features.md「設計判断 > クレジットカードの計上タイミング」）。
+model Expense {
+  id String @id @default(cuid())
+
+  /// 支出発生日。日付のみを保持しタイムゾーンの影響を受けないようにする
+  date      DateTime @db.Date
+  amountYen Int
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  paymentSourceId String
+  paymentSource   PaymentSource @relation(fields: [paymentSourceId], references: [id], onDelete: Restrict)
+
+  /// 店名。直近使った店名のサジェストに使う
+  storeName String?
+  memo      String?
+  /// 無駄使い検出の中核。nullable にしない
+  wasteTag  WasteTag
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+  @@index([date, categoryId])
+  @@index([date, paymentSourceId])
+}
+
+/// 払い出し先の月次予算（＝予算の主軸。合計が今月の総予算）。
+model Budget {
+  id String @id @default(cuid())
+
+  paymentSourceId String
+  paymentSource   PaymentSource @relation(fields: [paymentSourceId], references: [id], onDelete: Cascade)
+
+  /// "YYYY-MM"
+  yearMonth String @db.VarChar(7)
+  amountYen Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([paymentSourceId, yearMonth])
+  @@index([yearMonth])
+}
+
+/// カテゴリの月次予算（＝任意の補助上限。未設定でも全機能が成立する）。
+model CategoryBudget {
+  id String @id @default(cuid())
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  /// "YYYY-MM"
+  yearMonth String @db.VarChar(7)
+  amountYen Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([categoryId, yearMonth])
+  @@index([yearMonth])
+}
+
+/// 収入。「今月使える原資」としてのみ扱い、収支管理はしない。
+/// 1ヶ月に複数件登録できるためユニーク制約は付けない。
+model Income {
+  id String @id @default(cuid())
+
+  /// "YYYY-MM"
+  yearMonth String @db.VarChar(7)
+  amountYen Int
+  /// 「給与」「賞与」など
+  label     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([yearMonth])
+}
+
+/// パスキー（WebAuthn）の資格情報。利用者は1人なのでユーザーへの参照は持たない。
+/// 1件以上あるとパスワード単独でのログインを拒否する（docs/steps/step-7.md「設計判断 1」）。
+model Credential {
+  id String @id @default(cuid())
+
+  /// 認証器が発行した資格情報ID。base64url 文字列として保存する
+  credentialId String @unique
+  /// 公開鍵（COSE 形式のバイト列）
+  publicKey    Bytes
+  /// 署名カウンタ。クローン検知に使う。0 のままの認証器もある
+  counter      BigInt   @default(0)
+  /// "internal" / "hybrid" など。次回の認証UIのヒントに使う
+  transports   String[]
+  /// 「iPhone」など利用者が付ける名前。どの端末を消すのか分かるようにする
+  deviceName   String   @db.VarChar(30)
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  lastUsedAt DateTime?
+}
+
+/// ログイン試行の記録。レート制限と、攻撃に気づくために残す。
+///
+/// 冒頭の共通規約「全モデルに createdAt / updatedAt」の唯一の例外で updatedAt を持たない。
+/// 追記しかせず、書き込んだ行を更新することがないため
+/// （更新できると「失敗を成功に書き換える」経路を作ることにもなる）。
+model LoginAttempt {
+  id String @id @default(cuid())
+
+  /// IP を AUTH_SECRET で HMAC-SHA256 したもの。生IPは保存しない
+  ipHash    String
+  succeeded Boolean
+
+  createdAt DateTime @default(now())
+
+  @@index([ipHash, createdAt])
+}

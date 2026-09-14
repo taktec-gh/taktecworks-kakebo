@@ -1,0 +1,2 @@
+# 改行コードを LF に統一する（Windows で CRLF が混ざるのを防ぐ）
+* text=auto eol=lf
