@@ -393,7 +393,50 @@ CLAUDE.md のとおり、**`userId` の絞り込みを外して落ちること�
 
 ## 実装完了後の引き継ぎ（tester 向け）
 
-（implementer の完了後にここへ追記する。**期待値の根拠は上の仕様であって、この節ではない。**）
+implementer の実装が完了した時点（コミット `5f12290`、2026-09-19）の事実を記録する。
+**期待値の根拠は上の仕様であって、この節ではない。** シグネチャは実ファイルを読んで確認すること。
+
+### モジュール構成
+
+| ファイル | 役割 |
+|---|---|
+| `src/lib/user-id.ts` | `UserId` 型と `brandUserIdFromTrustedSource(value)`（空文字・非文字列で throw）。`as UserId` はこのファイルの中だけ |
+| `src/lib/users.ts` | `createUserWithPresets(client): Promise<UserId>`。User 作成とプリセット投入を1トランザクション |
+| `src/lib/seed.ts` | `seedUserPresets(client: Prisma.TransactionClient, userId)`。`upsert` のキーは `userId_name`。`seedDatabase` は削除 |
+| `src/lib/session.ts` | `createSession(userId)`、`requireUserId()`（無ければ `redirect(LOGIN_PATH)`） |
+| `src/lib/auth.ts` | `createSessionToken(secret, userId, options?)`、`verifySessionToken` は `{ userId, iat, exp } \| null` |
+| `prisma/checks/data-isolation.ts` | 実DBの検証スクリプト（**単体テストの対象外**。実DBに接続するため） |
+
+データ層の関数は、設計判断 6 の例外を除き、すべて第2引数が `userId: UserId`（以降の引数は元の順序のまま）。
+
+### 仕様から補足・判断した点
+
+- **セッション JWT とチャレンジ JWT の区別（設計判断 8）** — セッション JWT は `typ` ヘッダに `SESSION_JWT_TYP = "kakebo-session+jwt"` を付け、検証で一致を必須にしている。チャレンジ JWT には `typ` を付けない
+- **`LOGIN_ERROR_MESSAGE` の文言を変更した**（`src/lib/auth-messages.ts`）。新しい文言は「ログインできませんでした。もう一度お試しください。」。パスワード欄が無くなったため。**この文言を採用する**（利用者の指示を受けて tester に依頼した時点の扱い）。テストに旧文言を直書きしている箇所は定数の参照に直すこと
+- **1件取得は `findFirst({ where: { id, userId } })`**。`findUnique` が残るのは `findCredentialByCredentialId` だけ
+- **`saveBudgets` / `saveCategoryBudgets` の持ち主確認** — 金額を保存する入力の id を `findMany({ where: { id: { in }, userId } })` で確かめ、1件でも自分のものでなければ**何も保存せず** `paymentSourceNotFound` / `categoryNotFound` を返す。null（未設定）の削除は `deleteMany` を `userId` で絞るだけなので、他人のIDでも成功扱いで何も消えない。`upsert` の `where` は `{ paymentSourceId_yearMonth: {...}, userId }`
+- **`createExpense` / `updateExpense`** — 入力検証のあと、カテゴリ → 払い出し先の順に持ち主を確認してから書き込む
+- **`getCredentialDeleteBlockedReason(totalCount)`** — `recoveryMode` 引数を削除
+- **削除した export** — `safeEqual` `verifyPassword` `getAppPassword` `isRecoveryMode` `shouldRequirePasskey` `countCredentials` `loginAction` `LoginForm` `LoginState` `SESSION_SUBJECT` `seedDatabase`。削除したファイルは `login-form.tsx` `login-state.ts` `prisma/seed.ts`
+- **複合外部キーは `onDelete: Restrict` のまま**。支出のあるユーザーを削除できることは実DBで確認済み
+
+### 実装完了時点のテスト結果
+
+`Tests 380 failed | 1181 passed (1561)`、`Test Files 26 failed | 51 passed (77)`。1612件から減っているのは、削除したモジュールを import する3ファイルが読み込みの段階で落ちているため
+（`tests/app/(auth)/login/actions.test.ts`、`actions-rate-limit.test.ts`、`login-form.test.tsx`）。
+
+原因の内訳（implementer の申告。**tester は自分で確かめること**）:
+
+- `userId` の引数追加による呼び出しのずれ、`findUnique` → `findFirst`
+- `@/lib/session` のモックに `requireUserId` が無い（Server Action とページのテスト）
+- 廃止した機能のテスト（パスワードログイン、`RECOVERY_MODE`、`seedDatabase`）
+- スキーマの制約が仕様どおり変わった（`tests/prisma/schema.test.ts`）
+- パスキーのログインで、フィクスチャの資格情報に `userId` が無いため `brandUserIdFromTrustedSource` が throw する
+- `LOGIN_ERROR_MESSAGE` の旧文言を直書きしている（`passkey-actions.test.ts` の11件）
+
+### 許可リストの検査について
+
+`as UserId` は定義ファイル `src/lib/user-id.ts` の中にしかない。走査のテストでは、**定義ファイルを別扱いにして、`as UserId` の出現はこのファイルだけ、`brandUserIdFromTrustedSource(` の呼び出しは許可リストの3ファイルだけ**、とするのが素直。
 
 ---
 
