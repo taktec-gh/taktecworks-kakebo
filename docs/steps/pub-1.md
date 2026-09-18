@@ -389,6 +389,34 @@ CLAUDE.md のとおり、**`userId` の絞り込みを外して落ちること�
 | 11 | 分離テストの表から Server Action を1行消す | 網羅の検査で落ちる |
 | 12 | `movePaymentSource` のトランザクション内の `update` から `userId` を外す | 落ちる |
 
+### 変異テストの結果（2026-09-19）
+
+tester の完了後（テスト 1650件がすべて成功した状態）に実施した。変異は1件ずつ入れ、指定した行に入ったことを確認してから全テストを流し、元のバイト列に戻した（戻ったことも照合した）。
+**12件すべてで落ちた。**
+
+| # | 変異 | 落ちた件数 | 落ちたテスト（要約） |
+|---|---|---:|---|
+| 1 | `deleteExpense` の `where` から `userId` | 2 | `expenses.test.ts` deleteExpense / 分離テスト deleteExpenseAction |
+| 2 | `getExpense` の `where` から `userId` | 3 | `expenses.test.ts` getExpense ×2 / 分離テスト「[id] 編集ページのデータ取得」 |
+| 3 | `setDefaultPaymentSource` の `updateMany` から `userId` | 2 | `payment-sources.test.ts` / 分離テスト setDefaultPaymentSourceAction（Bの既定が外れる） |
+| 4 | `listRecentStoreNames` から `userId` | 1 | `expenses.test.ts` listRecentStoreNames |
+| 5 | `getDashboardData` の `categoryBudget` から `userId` | 2 | `dashboard-data.test.ts`（7本すべての検査を含む） |
+| 6 | `saveBudgets` の `upsert` の `where` から `userId` | 1 | `budgets.test.ts` saveBudgets |
+| 7 | `createExpense` の関連先の持ち主確認を削る | 5 | `expenses.test.ts` createExpense ×4 / 分離テスト createExpenseAction |
+| 8 | `deleteCredential` の件数から `userId` | 2 | `credentials.test.ts` deleteCredential ×2 |
+| 9 | 登録時の `excludeCredentials` に全ユーザーのパスキーを並べる | 4 | `settings/passkeys/actions.test.ts` startPasskeyRegistrationAction ×4 |
+| 10 | `deleteExpenseAction` が固定の別ユーザーIDを渡す | 1 | `expenses/actions.test.ts` deleteExpenseAction |
+| 11 | 分離テストの表から `deleteIncomeAction` の行を消す | 1 | 分離テスト「表が全 Server Action を網羅している」 |
+| 12 | `movePaymentSource` のトランザクション内の `update` から `userId` | 1 | `payment-sources.test.ts` movePaymentSource |
+
+補足:
+
+- **#6 と #12 は、分離テスト（偽クライアント）では落ちず、データ層のモックのテストだけが検出した。** 実害の経路が塞がれているため。
+  #6 は `upsert` の前の持ち主確認で他人のIDが弾かれ、`upsert` まで届かない。#12 は並べ替えの対象IDを自分の一覧から計算するので、`where` に `userId` が無くても他人の行を指さない。
+  どちらも深層防御の層で、1層を外しても別の層が守っている状態。**データ層のモックのテストがその1層を個別に見張っている**
+- #9 の4件のうち3件は、テストのモックに `prisma.credential` が無いことによる失敗（変異の意味とは別の理由）。変異そのものを捉えているのは「`listCredentials` を `requireUserId` が返した `userId` で呼ぶ」の1件
+- #10 を検出するのは Server Action のテストの1件だけ。分離テストの表はデータ層を直接呼ぶ設計のため、Server Action から データ層への `userId` の受け渡しは `tests/app/**/actions.test.ts` が担っている
+
 ---
 
 ## 実装完了後の引き継ぎ（tester 向け）
