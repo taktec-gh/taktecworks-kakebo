@@ -18,12 +18,15 @@ import { PaymentSourceType, CostType } from "@/generated/prisma/enums";
 import { BUDGET_AMOUNT_ERRORS } from "@/lib/budget-calculation";
 import { BUDGET_ERRORS } from "@/lib/budgets";
 import { PAYMENT_SOURCE_VALIDATION_ERRORS } from "@/lib/payment-source-validation";
+import type { UserId } from "@/lib/user-id";
 import { YEAR_MONTH_ERRORS } from "@/lib/year-month";
 import {
   BUDGETS_PATH,
   budgetAmountFieldName,
   categoryBudgetAmountFieldName,
 } from "@/app/budgets/action-state";
+
+const USER_ID = "user_1" as UserId;
 
 class RedirectError extends Error {
   digest: string;
@@ -37,7 +40,7 @@ const redirect = vi.fn((url: string): never => {
   throw new RedirectError(url);
 });
 const revalidatePath = vi.fn();
-const getSession = vi.fn<() => Promise<{ sub: string; iat: number; exp: number } | null>>();
+const requireUserId = vi.fn<() => Promise<UserId>>();
 
 const saveBudgets = vi.fn();
 const saveCategoryBudgets = vi.fn();
@@ -47,7 +50,7 @@ const listCategories = vi.fn();
 
 vi.mock("next/navigation", () => ({ redirect: (url: string) => redirect(url) }));
 vi.mock("next/cache", () => ({ revalidatePath: (path: string) => revalidatePath(path) }));
-vi.mock("@/lib/session", () => ({ getSession: () => getSession() }));
+vi.mock("@/lib/session", () => ({ requireUserId: () => requireUserId() }));
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/budgets", async () => {
   const actual = await vi.importActual<typeof import("@/lib/budgets")>("@/lib/budgets");
@@ -79,11 +82,10 @@ const { saveBudgetsAction, saveCategoryBudgetsAction, deleteBudgetAction } = awa
 );
 const { initialBudgetActionState } = await import("@/app/budgets/action-state");
 
-const SESSION = { sub: "owner", iat: 0, exp: 9_999_999_999 };
-
 function makePaymentSource(overrides: Partial<PaymentSource> = {}): PaymentSource {
   return {
     id: "ps_1",
+    userId: USER_ID,
     name: "現金",
     type: PaymentSourceType.CASH,
     sortOrder: 1,
@@ -98,6 +100,7 @@ function makePaymentSource(overrides: Partial<PaymentSource> = {}): PaymentSourc
 function makeCategory(overrides: Partial<Category> = {}): Category {
   return {
     id: "cat_1",
+    userId: USER_ID,
     name: "食費",
     costType: CostType.VARIABLE,
     sortOrder: 1,
@@ -119,8 +122,8 @@ function formDataOf(entries: Record<string, string>): FormData {
 beforeEach(() => {
   redirect.mockClear();
   revalidatePath.mockClear();
-  getSession.mockReset();
-  getSession.mockResolvedValue(SESSION);
+  requireUserId.mockReset();
+  requireUserId.mockResolvedValue(USER_ID);
   saveBudgets.mockReset();
   saveCategoryBudgets.mockReset();
   deleteBudget.mockReset();
@@ -131,6 +134,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+/** requireUserId() が未ログインのときの実際の挙動（redirect(LOGIN_PATH) を呼んで例外を投げる）を再現する */
+function mockUnauthenticated(): void {
+  requireUserId.mockImplementation(() => {
+    redirect("/login");
+    throw new Error("unreachable");
+  });
+}
 
 describe("認証なしアクセスの拒否", () => {
   const cases: Array<[string, () => Promise<unknown>, ReturnType<typeof vi.fn>]> = [
@@ -166,7 +177,7 @@ describe("認証なしアクセスの拒否", () => {
   it.each(cases)(
     "%s はセッションが無ければ /login へ redirect し、データ層を呼ばない",
     async (_label, run, dataFn) => {
-      getSession.mockResolvedValue(null);
+      mockUnauthenticated();
       await expect(run()).rejects.toThrow("NEXT_REDIRECT");
       expect(redirect).toHaveBeenCalledWith("/login");
       expect(dataFn).not.toHaveBeenCalled();
@@ -204,7 +215,7 @@ describe("saveBudgetsAction", () => {
 
     await saveBudgetsAction(initialBudgetActionState, formData);
 
-    expect(saveBudgets).toHaveBeenCalledWith(expect.anything(), "2026-08", [
+    expect(saveBudgets).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-08", [
       { paymentSourceId: "ps_1", amountYen: 40000 },
       { paymentSourceId: "ps_2", amountYen: null },
     ]);
@@ -280,7 +291,7 @@ describe("saveCategoryBudgetsAction", () => {
 
     await saveCategoryBudgetsAction(initialBudgetActionState, formData);
 
-    expect(saveCategoryBudgets).toHaveBeenCalledWith(expect.anything(), "2026-08", [
+    expect(saveCategoryBudgets).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-08", [
       { categoryId: "cat_1", amountYen: 5000 },
     ]);
   });
@@ -343,7 +354,7 @@ describe("deleteBudgetAction", () => {
       formDataOf({ yearMonth: "2026-08", paymentSourceId: "ps_1" }),
     );
 
-    expect(deleteBudget).toHaveBeenCalledWith(expect.anything(), "ps_1", "2026-08");
+    expect(deleteBudget).toHaveBeenCalledWith(expect.anything(), USER_ID, "ps_1", "2026-08");
     expect(revalidatePath).toHaveBeenCalledWith(BUDGETS_PATH);
     expect(result).toEqual({ error: null, saved: true });
   });

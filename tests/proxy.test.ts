@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SESSION_COOKIE_NAME, createSessionToken } from "@/lib/auth";
 import { config, proxy } from "@/proxy";
+import type { UserId } from "@/lib/user-id";
 
 const SECRET = "test-auth-secret-0123456789abcdef";
 const OTHER_SECRET = "another-auth-secret-fedcba9876543210";
+const USER_ID = "user_1" as UserId;
 
 const ORIGIN = "http://localhost:3000";
 
@@ -108,7 +110,7 @@ describe("未認証で保護対象にアクセスした場合", () => {
 
 describe("Cookie はあるがセッションが無効な場合", () => {
   it("改竄されたトークンはリダイレクトし、Cookie を削除する", async () => {
-    const token = await createSessionToken(SECRET);
+    const token = await createSessionToken(SECRET, USER_ID);
     const [header, payload, signature] = token.split(".");
     const tamperedSignature = tamperSignature(signature);
     expect(Buffer.from(tamperedSignature, "base64url")).not.toEqual(
@@ -124,7 +126,7 @@ describe("Cookie はあるがセッションが無効な場合", () => {
   });
 
   it("別の鍵で署名されたトークンはリダイレクトする", async () => {
-    const forged = await createSessionToken(OTHER_SECRET);
+    const forged = await createSessionToken(OTHER_SECRET, USER_ID);
     const response = await proxy(requestFor("/", forged));
     expectRedirectedToLogin(response);
     expect(response.headers.get("set-cookie")).toContain(`${SESSION_COOKIE_NAME}=;`);
@@ -132,7 +134,7 @@ describe("Cookie はあるがセッションが無効な場合", () => {
 
   it("期限切れのトークンはリダイレクトする", async () => {
     // 10秒前に発行した有効期間1秒のトークン → 現在時刻では失効済み
-    const expired = await createSessionToken(SECRET, {
+    const expired = await createSessionToken(SECRET, USER_ID, {
       now: new Date(Date.now() - 10_000),
       maxAgeSeconds: 1,
     });
@@ -150,12 +152,12 @@ describe("Cookie はあるがセッションが無効な場合", () => {
 
 describe("有効なセッションがある場合", () => {
   it.each(["/", "/expenses", "/settings/payment-sources"])("%s を通す", async (pathname) => {
-    const token = await createSessionToken(SECRET);
+    const token = await createSessionToken(SECRET, USER_ID);
     expectPassedThrough(await proxy(requestFor(pathname, token)));
   });
 
   it("Cookie 名が違えばセッションとして扱わない", async () => {
-    const token = await createSessionToken(SECRET);
+    const token = await createSessionToken(SECRET, USER_ID);
     const headers = new Headers({ cookie: `other_session=${token}` });
     expectRedirectedToLogin(await proxy(new NextRequest(`${ORIGIN}/`, { headers })));
   });
@@ -168,7 +170,7 @@ describe("AUTH_SECRET 未設定（fail-closed）", () => {
   });
 
   it("Cookie を持っていても throw する", async () => {
-    const token = await createSessionToken(SECRET);
+    const token = await createSessionToken(SECRET, USER_ID);
     vi.stubEnv("AUTH_SECRET", "");
     await expect(proxy(requestFor("/expenses", token))).rejects.toThrow("AUTH_SECRET is not set");
   });

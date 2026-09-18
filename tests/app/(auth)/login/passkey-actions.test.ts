@@ -14,14 +14,17 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createSessionToken } from "@/lib/auth";
+import { createSessionToken, LOGIN_ERROR_MESSAGE } from "@/lib/auth";
 import { createChallengeToken } from "@/lib/passkey";
+import type { UserId } from "@/lib/user-id";
 
 const SECRET = "test-auth-secret-0123456789abcdef";
 const RP_ID = "localhost";
 const RP_ORIGIN = "http://localhost:3123";
-const LOGIN_ERROR_MESSAGE_EXPECTED =
-  "ログインできませんでした。パスワードを確認してください。";
+const CREDENTIAL_OWNER_ID = "user_owner" as UserId;
+// 旧文言を直書きしない。定数 LOGIN_ERROR_MESSAGE を参照する
+// （docs/steps/pub-1.md「実装完了後の引き継ぎ」で採用が決まった新しい文言）
+const LOGIN_ERROR_MESSAGE_EXPECTED = LOGIN_ERROR_MESSAGE;
 
 // ---- @simplewebauthn/server のモック ----
 const generateAuthenticationOptions = vi.fn(async (opts: unknown) => {
@@ -94,16 +97,25 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 // ---- セッション発行のモック ----
-const createSession = vi.fn(async () => {});
-vi.mock("@/lib/session", () => ({ createSession: () => createSession() }));
+const createSession = vi.fn(async (..._args: unknown[]) => {});
+vi.mock("@/lib/session", () => ({ createSession: (...args: unknown[]) => createSession(...args) }));
 
 const { startPasskeyLoginAction, verifyPasskeyLoginAction } = await import(
   "@/app/(auth)/login/passkey-actions"
 );
 
-function makeCredential(overrides: Partial<{ credentialId: string; publicKey: Uint8Array; counter: bigint; transports: string[] }> = {}) {
+function makeCredential(
+  overrides: Partial<{
+    credentialId: string;
+    publicKey: Uint8Array;
+    counter: bigint;
+    transports: string[];
+    userId: string;
+  }> = {},
+) {
   return {
     id: "cred_1",
+    userId: CREDENTIAL_OWNER_ID,
     credentialId: "cred-1",
     publicKey: new Uint8Array([1, 2, 3]),
     counter: BigInt(0),
@@ -223,6 +235,19 @@ describe("verifyPasskeyLoginAction — 正常系", () => {
     });
   });
 
+  it("セッションは、検証した資格情報の持ち主（Credential.userId）に対して発行する。利用者IDはリクエストから受け取らない", async () => {
+    // 「Aの資格情報IDで認証したのに、Bのセッションが発行される」ような取り違えが無いことを、
+    // 資格情報の持ち主を変えて確認する（docs/steps/pub-1.md「パスキー」の観点）。
+    const specificOwner = "user_specific_owner" as UserId;
+    credentialFindUnique.mockResolvedValue(makeCredential({ userId: specificOwner }));
+    const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET);
+    cookieStore.set("kakeibo_passkey_auth", { name: "kakeibo_passkey_auth", value: token });
+
+    await verifyPasskeyLoginAction(authResponse);
+
+    expect(createSession).toHaveBeenCalledWith(specificOwner);
+  });
+
   it("verifyAuthenticationResponse には検証に必要な資格情報（保存済みcounter含む）を渡す", async () => {
     credentialFindUnique.mockResolvedValue(makeCredential({ counter: BigInt(2) }));
     const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET);
@@ -316,8 +341,8 @@ describe("verifyPasskeyLoginAction — チャレンジの単回性・取り違�
     expect(verifyAuthenticationResponse).not.toHaveBeenCalled();
   });
 
-  it("セッション JWT をチャレンジとして渡すと拒否する（sub が 'owner'）", async () => {
-    const sessionToken = await createSessionToken(SECRET);
+  it("セッション JWT をチャレンジとして渡すと拒否する（typ ヘッダが無く、sub もユーザーID）", async () => {
+    const sessionToken = await createSessionToken(SECRET, CREDENTIAL_OWNER_ID);
     cookieStore.set("kakeibo_passkey_auth", { name: "kakeibo_passkey_auth", value: sessionToken });
 
     const result = await verifyPasskeyLoginAction(authResponse);

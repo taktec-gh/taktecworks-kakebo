@@ -18,17 +18,19 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Income } from "@/generated/prisma/client";
+import type { UserId } from "@/lib/user-id";
 
-const listIncomesMock = vi.fn<(client: unknown, yearMonth: string) => Promise<Income[]>>();
+const USER_ID = "user_1" as UserId;
+
+const listIncomesMock =
+  vi.fn<(client: unknown, userId: UserId, yearMonth: string) => Promise<Income[]>>();
 
 vi.mock("next/server", () => ({
   connection: async () => undefined,
 }));
 
 vi.mock("@/lib/session", () => ({
-  createSession: async () => {},
-  destroySession: async () => {},
-  getSession: async () => null,
+  requireUserId: async () => USER_ID,
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
@@ -37,7 +39,8 @@ vi.mock("@/lib/incomes", async () => {
   const actual = await vi.importActual<typeof import("@/lib/incomes")>("@/lib/incomes");
   return {
     ...actual,
-    listIncomes: (client: unknown, yearMonth: string) => listIncomesMock(client, yearMonth),
+    listIncomes: (client: unknown, userId: UserId, yearMonth: string) =>
+      listIncomesMock(client, userId, yearMonth),
   };
 });
 
@@ -53,6 +56,7 @@ function buildIncome(overrides: Partial<Income> = {}): Income {
   idCounter += 1;
   return {
     id: `income_${idCounter}`,
+    userId: USER_ID,
     yearMonth: "2026-08",
     amountYen: 0,
     label: null,
@@ -79,7 +83,7 @@ describe("対象月の解決", () => {
     expect(
       screen.getByRole("heading", { name: "2026年8月に受け取った収入" }),
     ).toBeInTheDocument();
-    expect(listIncomesMock).toHaveBeenCalledWith(expect.anything(), "2026-08");
+    expect(listIncomesMock).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-08");
   });
 
   it("?month=2026-07 を指定すればその月を対象にする", async () => {
@@ -90,7 +94,7 @@ describe("対象月の解決", () => {
     expect(
       screen.getByRole("heading", { name: "2026年7月に受け取った収入" }),
     ).toBeInTheDocument();
-    expect(listIncomesMock).toHaveBeenCalledWith(expect.anything(), "2026-07");
+    expect(listIncomesMock).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-07");
   });
 
   it("?month が不正な形式なら今月にフォールバックする", async () => {
@@ -100,7 +104,7 @@ describe("対象月の解決", () => {
     });
     render(jsx);
 
-    expect(listIncomesMock).toHaveBeenCalledWith(expect.anything(), "2026-08");
+    expect(listIncomesMock).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-08");
   });
 });
 

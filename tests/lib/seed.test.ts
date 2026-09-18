@@ -1,8 +1,13 @@
 // @vitest-environment node
 //
-// PRESET_CATEGORIES / PRESET_PAYMENT_SOURCES の内容と seedDatabase() の呼び出しを検証する。
-// 実データベースには接続せず、PrismaClient をモックする
+// PRESET_CATEGORIES / PRESET_PAYMENT_SOURCES の内容と seedUserPresets() の呼び出しを検証する。
+// 実データベースには接続せず、PrismaClient（トランザクションクライアント）をモックする
 // （docs/steps/step-2.md「テストの方針」）。
+//
+// 期待値の根拠:
+// - docs/steps/pub-1.md 設計判断 8「seedDatabase(client) を seedUserPresets(client, userId: UserId)
+//   にし、upsert のキーを (userId, name) にする。冪等性は保つ」
+// - docs/steps/pub-1.md「実装内容 > 5. seed.ts / users.ts」「upsert のキーは userId_name」
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -11,9 +16,12 @@ import {
   PaymentSourceType,
   type Category,
   type PaymentSource,
-  type PrismaClient,
+  type Prisma,
 } from "@/generated/prisma/client";
-import { PRESET_CATEGORIES, PRESET_PAYMENT_SOURCES, seedDatabase } from "@/lib/seed";
+import { PRESET_CATEGORIES, PRESET_PAYMENT_SOURCES, seedUserPresets } from "@/lib/seed";
+import type { UserId } from "@/lib/user-id";
+
+const USER_ID = "user_1" as UserId;
 
 // features.md「初期カテゴリをプリセット」の記載順。sortOrder はこの順で 1 始まりの連番
 // （docs/steps/step-2.md「sortOrder は 1 始まり」）
@@ -104,40 +112,48 @@ describe("PRESET_PAYMENT_SOURCES", () => {
   });
 });
 
-/** PrismaClient のうち seedDatabase が使う部分だけをモックする */
+/** seedUserPresets が使う部分だけを備えたトランザクションクライアントのモック */
 function createMockClient(): {
-  client: PrismaClient;
+  client: Prisma.TransactionClient;
   categoryUpsert: ReturnType<typeof vi.fn>;
   paymentSourceUpsert: ReturnType<typeof vi.fn>;
 } {
   const categoryUpsert = vi.fn(
     async (args: {
-      where: { name: string };
+      where: { userId_name: { userId: UserId; name: string } };
       update: Record<string, never>;
-      create: { name: string; costType: CostType; sortOrder: number };
+      create: { userId: UserId; name: string; costType: CostType; sortOrder: number };
     }): Promise<Category> => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       return {
         id: `cat_${args.create.name}`,
+        userId: args.create.userId,
         name: args.create.name,
         costType: args.create.costType,
         sortOrder: args.create.sortOrder,
         isHidden: false,
         createdAt: now,
         updatedAt: now,
-      };
+      } as Category;
     },
   );
 
   const paymentSourceUpsert = vi.fn(
     async (args: {
-      where: { name: string };
+      where: { userId_name: { userId: UserId; name: string } };
       update: Record<string, never>;
-      create: { name: string; type: PaymentSourceType; sortOrder: number; isDefault: boolean };
+      create: {
+        userId: UserId;
+        name: string;
+        type: PaymentSourceType;
+        sortOrder: number;
+        isDefault: boolean;
+      };
     }): Promise<PaymentSource> => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       return {
         id: `ps_${args.create.name}`,
+        userId: args.create.userId,
         name: args.create.name,
         type: args.create.type,
         sortOrder: args.create.sortOrder,
@@ -145,34 +161,35 @@ function createMockClient(): {
         isDefault: args.create.isDefault,
         createdAt: now,
         updatedAt: now,
-      };
+      } as PaymentSource;
     },
   );
 
   const client = {
     category: { upsert: categoryUpsert },
     paymentSource: { upsert: paymentSourceUpsert },
-  } as unknown as PrismaClient;
+  } as unknown as Prisma.TransactionClient;
 
   return { client, categoryUpsert, paymentSourceUpsert };
 }
 
-describe("seedDatabase", () => {
+describe("seedUserPresets", () => {
   it("カテゴリごとに1回ずつ upsert を呼ぶ（PRESET_CATEGORIES と同数）", async () => {
     const { client, categoryUpsert } = createMockClient();
-    await seedDatabase(client);
+    await seedUserPresets(client, USER_ID);
     expect(categoryUpsert).toHaveBeenCalledTimes(PRESET_CATEGORIES.length);
   });
 
-  it("category.upsert は name で where、update は空、create は preset の内容", async () => {
+  it("category.upsert は (userId, name) で where、update は空、create は userId + preset の内容", async () => {
     const { client, categoryUpsert } = createMockClient();
-    await seedDatabase(client);
+    await seedUserPresets(client, USER_ID);
 
     PRESET_CATEGORIES.forEach((preset, i) => {
       expect(categoryUpsert).toHaveBeenNthCalledWith(i + 1, {
-        where: { name: preset.name },
+        where: { userId_name: { userId: USER_ID, name: preset.name } },
         update: {},
         create: {
+          userId: USER_ID,
           name: preset.name,
           costType: preset.costType,
           sortOrder: preset.sortOrder,
@@ -183,19 +200,20 @@ describe("seedDatabase", () => {
 
   it("払い出し先ごとに1回ずつ upsert を呼ぶ（PRESET_PAYMENT_SOURCES と同数）", async () => {
     const { client, paymentSourceUpsert } = createMockClient();
-    await seedDatabase(client);
+    await seedUserPresets(client, USER_ID);
     expect(paymentSourceUpsert).toHaveBeenCalledTimes(PRESET_PAYMENT_SOURCES.length);
   });
 
-  it("paymentSource.upsert は name で where、update は空、create は preset の内容", async () => {
+  it("paymentSource.upsert は (userId, name) で where、update は空、create は userId + preset の内容", async () => {
     const { client, paymentSourceUpsert } = createMockClient();
-    await seedDatabase(client);
+    await seedUserPresets(client, USER_ID);
 
     PRESET_PAYMENT_SOURCES.forEach((preset, i) => {
       expect(paymentSourceUpsert).toHaveBeenNthCalledWith(i + 1, {
-        where: { name: preset.name },
+        where: { userId_name: { userId: USER_ID, name: preset.name } },
         update: {},
         create: {
+          userId: USER_ID,
           name: preset.name,
           type: preset.type,
           sortOrder: preset.sortOrder,
@@ -207,7 +225,7 @@ describe("seedDatabase", () => {
 
   it("upsert の update は常に {}（既存レコードを更新しない。並べ替え・非表示・既定値変更を再実行で巻き戻さないため）", async () => {
     const { client, categoryUpsert, paymentSourceUpsert } = createMockClient();
-    await seedDatabase(client);
+    await seedUserPresets(client, USER_ID);
 
     for (const call of categoryUpsert.mock.calls) {
       expect(call[0].update).toEqual({});
@@ -219,7 +237,7 @@ describe("seedDatabase", () => {
 
   it("戻り値の categories / paymentSources は upsert の戻り値をそのまま定義順に含む", async () => {
     const { client } = createMockClient();
-    const result = await seedDatabase(client);
+    const result = await seedUserPresets(client, USER_ID);
 
     expect(result.categories).toHaveLength(PRESET_CATEGORIES.length);
     expect(result.categories.map((c) => c.name)).toEqual(
@@ -235,18 +253,30 @@ describe("seedDatabase", () => {
   it("2回実行しても同じ引数で upsert を呼ぶ（冪等）", async () => {
     const { client, categoryUpsert, paymentSourceUpsert } = createMockClient();
 
-    await seedDatabase(client);
+    await seedUserPresets(client, USER_ID);
     const firstCategoryArgs = categoryUpsert.mock.calls.map((c) => c[0]);
     const firstPaymentSourceArgs = paymentSourceUpsert.mock.calls.map((c) => c[0]);
 
     categoryUpsert.mockClear();
     paymentSourceUpsert.mockClear();
 
-    await seedDatabase(client);
+    await seedUserPresets(client, USER_ID);
     const secondCategoryArgs = categoryUpsert.mock.calls.map((c) => c[0]);
     const secondPaymentSourceArgs = paymentSourceUpsert.mock.calls.map((c) => c[0]);
 
     expect(secondCategoryArgs).toEqual(firstCategoryArgs);
     expect(secondPaymentSourceArgs).toEqual(firstPaymentSourceArgs);
+  });
+
+  it("別のユーザーIDで呼ぶと where/create のユーザーIDだけが変わる（同名でも衝突しない設計の確認）", async () => {
+    const { client, categoryUpsert } = createMockClient();
+    const OTHER_USER_ID = "user_2" as UserId;
+
+    await seedUserPresets(client, OTHER_USER_ID);
+
+    expect(categoryUpsert.mock.calls[0][0].where).toEqual({
+      userId_name: { userId: OTHER_USER_ID, name: PRESET_CATEGORIES[0].name },
+    });
+    expect(categoryUpsert.mock.calls[0][0].create.userId).toBe(OTHER_USER_ID);
   });
 });
