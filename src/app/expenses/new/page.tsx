@@ -8,6 +8,7 @@ import { DEFAULT_WASTE_TAG } from "@/lib/expense-validation";
 import { listQuickPickCategoryIds, listRecentStoreNames } from "@/lib/expenses";
 import { listPaymentSources } from "@/lib/payment-sources";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 
 import { CATEGORIES_PATH } from "../../settings/categories/action-state";
 import { PAYMENT_SOURCES_PATH } from "../../settings/payment-sources/action-state";
@@ -33,11 +34,13 @@ export const metadata: Metadata = {
  */
 export default async function NewExpensePage() {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
 
   const now = new Date();
   const [categories, paymentSources] = await Promise.all([
-    listCategories(prisma),
-    listPaymentSources(prisma),
+    listCategories(prisma, userId),
+    listPaymentSources(prisma, userId),
   ]);
 
   const visibleCategories = categories.filter((category) => !category.isHidden);
@@ -46,10 +49,11 @@ export default async function NewExpensePage() {
   const [quickPickCategoryIds, storeNameSuggestions] = await Promise.all([
     listQuickPickCategoryIds(
       prisma,
+      userId,
       visibleCategories.map((category) => category.id),
       now,
     ),
-    listRecentStoreNames(prisma),
+    listRecentStoreNames(prisma, userId),
   ]);
 
   // 既定が無効化されている等の異常時も入力できるよう、先頭へ落とす

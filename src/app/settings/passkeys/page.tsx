@@ -5,6 +5,7 @@ import { connection } from "next/server";
 import { listCredentials } from "@/lib/credentials";
 import { formatDateFullLabel, getCurrentDate } from "@/lib/expense-date";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 
 import { deletePasskeyAction, finishPasskeyRegistrationAction, startPasskeyRegistrationAction } from "./actions";
 import type { PasskeyListItem } from "./action-state";
@@ -32,8 +33,10 @@ function toJstLabel(date: Date): string {
 
 export default async function PasskeysPage() {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
 
-  const credentials = await listCredentials(prisma);
+  const credentials = await listCredentials(prisma, userId);
   // publicKey / counter はクライアントへ渡さない
   const items: PasskeyListItem[] = credentials.map((credential) => ({
     id: credential.id,

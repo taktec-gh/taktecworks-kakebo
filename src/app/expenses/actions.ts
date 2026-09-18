@@ -3,11 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-import { LOGIN_PATH } from "@/lib/auth";
 import { validateExpenseId, validateExpenseInput } from "@/lib/expense-validation";
 import { createExpense, deleteExpense, updateExpense } from "@/lib/expenses";
 import { prisma } from "@/lib/prisma";
-import { getSession } from "@/lib/session";
+import { requireUserId } from "@/lib/session";
 
 import {
   EXPENSES_PATH,
@@ -23,13 +22,9 @@ import {
  * 失敗時は例外を投げずに利用者向けの日本語メッセージを返す。
  *
  * Server Action は POST エンドポイントとして直接叩けるため、
- * 画面側のガード（proxy）とは別に各アクションでもセッションを確認する。
+ * 画面側のガード（proxy）とは別に各アクションの先頭で requireUserId() を呼び、
+ * データ層へは必ずその戻り値（ログイン中の利用者ID）を渡す（docs/steps/pub-1.md）。
  */
-
-async function requireSession(): Promise<void> {
-  const session = await getSession();
-  if (!session) redirect(LOGIN_PATH);
-}
 
 /** 一覧・登録・編集のいずれからも最新の内容が見えるようにする */
 function revalidateExpenses(id?: string): void {
@@ -65,12 +60,12 @@ export async function createExpenseAction(
   prevState: ExpenseActionState,
   formData: FormData,
 ): Promise<ExpenseActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const validated = readInput(formData, new Date());
   if (!validated.ok) return { error: validated.error, savedCount: prevState.savedCount };
 
-  const result = await createExpense(prisma, validated.value);
+  const result = await createExpense(prisma, userId, validated.value);
   if (!result.ok) return { error: result.error, savedCount: prevState.savedCount };
 
   revalidateExpenses();
@@ -82,7 +77,7 @@ export async function updateExpenseAction(
   prevState: ExpenseActionState,
   formData: FormData,
 ): Promise<ExpenseActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateExpenseId(formData.get("id"));
   if (!id.ok) return { error: id.error, savedCount: prevState.savedCount };
@@ -90,7 +85,7 @@ export async function updateExpenseAction(
   const validated = readInput(formData, new Date());
   if (!validated.ok) return { error: validated.error, savedCount: prevState.savedCount };
 
-  const result = await updateExpense(prisma, id.value, validated.value);
+  const result = await updateExpense(prisma, userId, id.value, validated.value);
   if (!result.ok) return { error: result.error, savedCount: prevState.savedCount };
 
   revalidateExpenses(id.value);
@@ -105,12 +100,12 @@ export async function deleteExpenseAction(
   prevState: ExpenseActionState,
   formData: FormData,
 ): Promise<ExpenseActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateExpenseId(formData.get("id"));
   if (!id.ok) return { error: id.error, savedCount: prevState.savedCount };
 
-  const result = await deleteExpense(prisma, id.value);
+  const result = await deleteExpense(prisma, userId, id.value);
   if (!result.ok) return { error: result.error, savedCount: prevState.savedCount };
 
   revalidateExpenses(id.value);

@@ -5,6 +5,7 @@ import {
   calculateReorder,
   type MoveDirection,
 } from "@/lib/payment-source-order";
+import type { UserId } from "@/lib/user-id";
 
 /**
  * 払い出し先のデータ層。
@@ -13,8 +14,13 @@ import {
  * テストからモックを差し込めるようにするため）。このモジュールはサーバー専用で、
  * Client Component から import しないこと。
  *
+ * **全操作を userId で絞る（docs/steps/pub-1.md 設計判断 6）。** 取得・更新・削除は
+ * `where: { id, userId }`、一覧・件数・集計・採番も `where` に userId を付ける。
+ * 他人の払い出し先IDには、存在しないIDと同じ notFound を返す。
+ * 「既定」「有効な件数」などの禁止条件もすべて利用者単位で判定する。
+ *
  * 禁止条件（docs/steps/step-3.md「設計判断」）:
- * - 既定の払い出し先は常にちょうど1件。既定は無効化も削除もできない
+ * - 既定の払い出し先は（利用者ごとに）常にちょうど1件。既定は無効化も削除もできない
  * - 無効な払い出し先は既定にできない
  * - 有効な払い出し先が1件しかないとき、それは無効化できない
  * - 削除は Expense も Budget も参照していないときだけ
@@ -57,8 +63,12 @@ function getPrismaErrorCode(error: unknown): string | null {
  * 一覧を取得する。有効→無効の順、各グループ内は sortOrder 昇順。
  * 同じ sortOrder があっても順序が揺れないよう id を最後のキーにする。
  */
-export async function listPaymentSources(client: PrismaClient): Promise<PaymentSource[]> {
+export async function listPaymentSources(
+  client: PrismaClient,
+  userId: UserId,
+): Promise<PaymentSource[]> {
   return client.paymentSource.findMany({
+    where: { userId },
     orderBy: [{ isActive: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
   });
 }
@@ -66,9 +76,10 @@ export async function listPaymentSources(client: PrismaClient): Promise<PaymentS
 /** 1件取得。存在しなければ null */
 export async function getPaymentSource(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<PaymentSource | null> {
-  return client.paymentSource.findUnique({ where: { id } });
+  return client.paymentSource.findFirst({ where: { id, userId } });
 }
 
 export type PaymentSourceDetail = {
@@ -77,7 +88,7 @@ export type PaymentSourceDetail = {
   expenseCount: number;
   /** この払い出し先に設定されている月次予算の件数 */
   budgetCount: number;
-  /** 有効な払い出し先の総数（自分を含む） */
+  /** その利用者の有効な払い出し先の総数（自分を含む） */
   activeCount: number;
 };
 
@@ -87,15 +98,16 @@ export type PaymentSourceDetail = {
  */
 export async function getPaymentSourceDetail(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<PaymentSourceDetail | null> {
-  const paymentSource = await client.paymentSource.findUnique({ where: { id } });
+  const paymentSource = await client.paymentSource.findFirst({ where: { id, userId } });
   if (!paymentSource) return null;
 
   const [expenseCount, budgetCount, activeCount] = await Promise.all([
-    client.expense.count({ where: { paymentSourceId: id } }),
-    client.budget.count({ where: { paymentSourceId: id } }),
-    client.paymentSource.count({ where: { isActive: true } }),
+    client.expense.count({ where: { userId, paymentSourceId: id } }),
+    client.budget.count({ where: { userId, paymentSourceId: id } }),
+    client.paymentSource.count({ where: { userId, isActive: true } }),
   ]);
 
   return { paymentSource, expenseCount, budgetCount, activeCount };
@@ -131,19 +143,25 @@ export type CreatePaymentSourceInput = {
 };
 
 /**
- * 追加する。sortOrder は既存の最大 + 1（一覧の末尾）。
+ * 追加する。sortOrder はその利用者の既存の最大 + 1（一覧の末尾）。
  * isDefault は常に false。既定にするのは別操作。
+ * userId は引数から設定する（入力オブジェクトの値は使わない）。
  */
 export async function createPaymentSource(
   client: PrismaClient,
+  userId: UserId,
   input: CreatePaymentSourceInput,
 ): Promise<PaymentSourceResult<PaymentSource>> {
-  const aggregate = await client.paymentSource.aggregate({ _max: { sortOrder: true } });
+  const aggregate = await client.paymentSource.aggregate({
+    where: { userId },
+    _max: { sortOrder: true },
+  });
   const nextSortOrder = (aggregate._max.sortOrder ?? 0) + 1;
 
   try {
     const created = await client.paymentSource.create({
       data: {
+        userId,
         name: input.name,
         type: input.type,
         sortOrder: nextSortOrder,
@@ -171,11 +189,12 @@ export type UpdatePaymentSourceInput = {
  */
 export async function updatePaymentSource(
   client: PrismaClient,
+  userId: UserId,
   input: UpdatePaymentSourceInput,
 ): Promise<PaymentSourceResult<PaymentSource>> {
   try {
     const updated = await client.paymentSource.update({
-      where: { id: input.id },
+      where: { id: input.id, userId },
       data: { name: input.name, type: input.type },
     });
     return { ok: true, value: updated };
@@ -190,14 +209,17 @@ export async function updatePaymentSource(
 /**
  * 既定を切り替える。
  *
- * 部分ユニークインデックス（isDefault = true は最大1件）に衝突しないよう、
+ * 部分ユニークインデックス（利用者ごとに isDefault = true は最大1件）に衝突しないよう、
  * 必ずトランザクション内で「旧既定を false にしてから」新既定を true にする。
+ *
+ * **旧既定を外す updateMany は userId で絞る。** 付け忘れると全利用者の既定が外れる。
  */
 export async function setDefaultPaymentSource(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<PaymentSourceResult<PaymentSource>> {
-  const target = await client.paymentSource.findUnique({ where: { id } });
+  const target = await client.paymentSource.findFirst({ where: { id, userId } });
   if (!target) return { ok: false, error: PAYMENT_SOURCE_ERRORS.notFound };
   if (!target.isActive) {
     return { ok: false, error: PAYMENT_SOURCE_ERRORS.defaultMustBeActive };
@@ -205,8 +227,11 @@ export async function setDefaultPaymentSource(
   if (target.isDefault) return { ok: true, value: target };
 
   const [, updated] = await client.$transaction([
-    client.paymentSource.updateMany({ where: { isDefault: true }, data: { isDefault: false } }),
-    client.paymentSource.update({ where: { id }, data: { isDefault: true } }),
+    client.paymentSource.updateMany({
+      where: { userId, isDefault: true },
+      data: { isDefault: false },
+    }),
+    client.paymentSource.update({ where: { id, userId }, data: { isDefault: true } }),
   ]);
 
   return { ok: true, value: updated };
@@ -217,14 +242,16 @@ export async function setDefaultPaymentSource(
  *
  * 無効化できないのは次の場合:
  * - 既定の払い出し先（先に別のものを既定にしてもらう）
- * - 有効なものが自分しかない（支出登録に有効な払い出し先が最低1件必要なため）
+ * - 有効なものが自分しかない（支出登録に有効な払い出し先が最低1件必要なため）。
+ *   件数はその利用者の払い出し先で数える
  */
 export async function setPaymentSourceActive(
   client: PrismaClient,
+  userId: UserId,
   id: string,
   isActive: boolean,
 ): Promise<PaymentSourceResult<PaymentSource>> {
-  const target = await client.paymentSource.findUnique({ where: { id } });
+  const target = await client.paymentSource.findFirst({ where: { id, userId } });
   if (!target) return { ok: false, error: PAYMENT_SOURCE_ERRORS.notFound };
   if (target.isActive === isActive) return { ok: true, value: target };
 
@@ -232,13 +259,16 @@ export async function setPaymentSourceActive(
     if (target.isDefault) {
       return { ok: false, error: PAYMENT_SOURCE_ERRORS.deactivateDefault };
     }
-    const activeCount = await client.paymentSource.count({ where: { isActive: true } });
+    const activeCount = await client.paymentSource.count({ where: { userId, isActive: true } });
     if (activeCount <= 1) {
       return { ok: false, error: PAYMENT_SOURCE_ERRORS.deactivateLastActive };
     }
   }
 
-  const updated = await client.paymentSource.update({ where: { id }, data: { isActive } });
+  const updated = await client.paymentSource.update({
+    where: { id, userId },
+    data: { isActive },
+  });
   return { ok: true, value: updated };
 }
 
@@ -246,21 +276,25 @@ export async function setPaymentSourceActive(
  * 同一グループ内で1つ上 / 下へ動かす。
  * 並び順の計算は純粋関数（calculateReorder）に任せ、ここは反映だけを行う。
  *
+ * 並び替えの対象はその利用者の払い出し先だけ。トランザクション内の**各** update も
+ * userId で絞る。
+ *
  * @returns 反映後の全件（表示順）
  */
 export async function movePaymentSource(
   client: PrismaClient,
+  userId: UserId,
   id: string,
   direction: MoveDirection,
 ): Promise<PaymentSourceResult<PaymentSource[]>> {
-  const sources = await listPaymentSources(client);
+  const sources = await listPaymentSources(client, userId);
   const reordered = calculateReorder(sources, id, direction);
   if (!reordered.ok) return { ok: false, error: reordered.error };
 
   const updated = await client.$transaction(
     reordered.assignments.map((assignment) =>
       client.paymentSource.update({
-        where: { id: assignment.id },
+        where: { id: assignment.id, userId },
         data: { sortOrder: assignment.sortOrder },
       }),
     ),
@@ -273,20 +307,21 @@ export async function movePaymentSource(
  * 削除する。Expense も Budget も1件も紐づいていないときだけ許す。
  * それ以外は無効化を案内する（過去の家計の履歴を壊さないため）。
  *
- * 削除後に残りの sortOrder を 1 からの連番に振り直す（隙間を作らない）。
+ * 削除後にその利用者の残りの sortOrder を 1 からの連番に振り直す（隙間を作らない）。
  */
 export async function deletePaymentSource(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<PaymentSourceResult<null>> {
-  const sources = await listPaymentSources(client);
+  const sources = await listPaymentSources(client, userId);
   const target = sources.find((source) => source.id === id);
   if (!target) return { ok: false, error: PAYMENT_SOURCE_ERRORS.notFound };
   if (target.isDefault) return { ok: false, error: PAYMENT_SOURCE_ERRORS.deleteDefault };
 
   const [expenseCount, budgetCount] = await Promise.all([
-    client.expense.count({ where: { paymentSourceId: id } }),
-    client.budget.count({ where: { paymentSourceId: id } }),
+    client.expense.count({ where: { userId, paymentSourceId: id } }),
+    client.budget.count({ where: { userId, paymentSourceId: id } }),
   ]);
   if (expenseCount > 0) {
     return { ok: false, error: PAYMENT_SOURCE_ERRORS.deleteReferencedByExpense };
@@ -299,10 +334,10 @@ export async function deletePaymentSource(
 
   try {
     await client.$transaction([
-      client.paymentSource.delete({ where: { id } }),
+      client.paymentSource.delete({ where: { id, userId } }),
       ...assignments.map((assignment) =>
         client.paymentSource.update({
-          where: { id: assignment.id },
+          where: { id: assignment.id, userId },
           data: { sortOrder: assignment.sortOrder },
         }),
       ),

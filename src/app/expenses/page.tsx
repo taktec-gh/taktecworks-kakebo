@@ -9,6 +9,7 @@ import { summarizeExpenses } from "@/lib/expense-summary";
 import { listExpenses } from "@/lib/expenses";
 import { listPaymentSources } from "@/lib/payment-sources";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 import { getCurrentYearMonth } from "@/lib/year-month";
 
 import { NEW_EXPENSE_PATH } from "./action-state";
@@ -36,6 +37,8 @@ export default async function ExpensesPage({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
 
   const params = await searchParams;
   const now = new Date();
@@ -43,9 +46,9 @@ export default async function ExpensesPage({
   const filter = parseExpenseListFilter(params, now);
 
   const [listed, categories, paymentSources] = await Promise.all([
-    listExpenses(prisma, filter),
-    listCategories(prisma),
-    listPaymentSources(prisma),
+    listExpenses(prisma, userId, filter),
+    listCategories(prisma, userId),
+    listPaymentSources(prisma, userId),
   ]);
 
   const expenses = listed.ok ? listed.value : [];

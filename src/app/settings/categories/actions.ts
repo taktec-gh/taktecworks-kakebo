@@ -3,7 +3,6 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-import { LOGIN_PATH } from "@/lib/auth";
 import {
   createCategory,
   deleteCategory,
@@ -18,7 +17,7 @@ import {
   validateCategoryInput,
 } from "@/lib/category-validation";
 import { prisma } from "@/lib/prisma";
-import { getSession } from "@/lib/session";
+import { requireUserId } from "@/lib/session";
 
 import {
   CATEGORIES_PATH,
@@ -33,13 +32,9 @@ import {
  * 失敗時は例外を投げずに利用者向けの日本語メッセージを返す（払い出し先と同じ形）。
  *
  * Server Action は POST エンドポイントとして直接叩けるため、
- * 画面側のガード（proxy）とは別に各アクションでもセッションを確認する。
+ * 画面側のガード（proxy）とは別に各アクションの先頭で requireUserId() を呼び、
+ * データ層へは必ずその戻り値（ログイン中の利用者ID）を渡す（docs/steps/pub-1.md）。
  */
-
-async function requireSession(): Promise<void> {
-  const session = await getSession();
-  if (!session) redirect(LOGIN_PATH);
-}
 
 /** 一覧と編集ページの両方を最新化する */
 function revalidateCategories(id?: string): void {
@@ -52,7 +47,7 @@ export async function createCategoryAction(
   _prevState: CategoryActionState,
   formData: FormData,
 ): Promise<CategoryActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const validated = validateCategoryInput({
     name: formData.get("name"),
@@ -60,7 +55,7 @@ export async function createCategoryAction(
   });
   if (!validated.ok) return { error: validated.error };
 
-  const result = await createCategory(prisma, validated.value);
+  const result = await createCategory(prisma, userId, validated.value);
   if (!result.ok) return { error: result.error };
 
   revalidateCategories();
@@ -72,7 +67,7 @@ export async function updateCategoryAction(
   _prevState: CategoryActionState,
   formData: FormData,
 ): Promise<CategoryActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateCategoryId(formData.get("id"));
   if (!id.ok) return { error: id.error };
@@ -83,7 +78,11 @@ export async function updateCategoryAction(
   });
   if (!validated.ok) return { error: validated.error };
 
-  const result = await updateCategory(prisma, { id: id.value, ...validated.value });
+  const result = await updateCategory(prisma, userId, {
+    id: id.value,
+    name: validated.value.name,
+    costType: validated.value.costType,
+  });
   if (!result.ok) return { error: result.error };
 
   revalidateCategories(id.value);
@@ -98,14 +97,14 @@ export async function setCategoryHiddenAction(
   _prevState: CategoryActionState,
   formData: FormData,
 ): Promise<CategoryActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateCategoryId(formData.get("id"));
   if (!id.ok) return { error: id.error };
 
   const isHidden = formData.get("isHidden") === "true";
 
-  const result = await setCategoryHidden(prisma, id.value, isHidden);
+  const result = await setCategoryHidden(prisma, userId, id.value, isHidden);
   if (!result.ok) return { error: result.error };
 
   revalidateCategories(id.value);
@@ -117,7 +116,7 @@ export async function moveCategoryAction(
   _prevState: CategoryActionState,
   formData: FormData,
 ): Promise<CategoryActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateCategoryId(formData.get("id"));
   if (!id.ok) return { error: id.error };
@@ -127,7 +126,7 @@ export async function moveCategoryAction(
     return { error: CATEGORY_ORDER_ERRORS.invalidDirection };
   }
 
-  const result = await moveCategory(prisma, id.value, direction);
+  const result = await moveCategory(prisma, userId, id.value, direction);
   if (!result.ok) return { error: result.error };
 
   revalidateCategories(id.value);
@@ -142,12 +141,12 @@ export async function deleteCategoryAction(
   _prevState: CategoryActionState,
   formData: FormData,
 ): Promise<CategoryActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateCategoryId(formData.get("id"));
   if (!id.ok) return { error: CATEGORY_VALIDATION_ERRORS.idRequired };
 
-  const result = await deleteCategory(prisma, id.value);
+  const result = await deleteCategory(prisma, userId, id.value);
   if (!result.ok) return { error: result.error };
 
   revalidateCategories();

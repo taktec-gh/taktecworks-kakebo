@@ -2,6 +2,7 @@ import type { Income, PrismaClient } from "@/generated/prisma/client";
 
 import { sumAmounts } from "@/lib/budget-calculation";
 import { INCOME_AMOUNT_MAX_YEN, INCOME_AMOUNT_MIN_YEN } from "@/lib/income-validation";
+import type { UserId } from "@/lib/user-id";
 import { isYearMonth } from "@/lib/year-month";
 
 /**
@@ -16,6 +17,9 @@ import { isYearMonth } from "@/lib/year-month";
  * - **更新（updateIncome）は作らない。** 追加・一覧・削除のみ。
  *   金額とラベルだけの小さなレコードなので、直したいときは消して入れ直すほうが
  *   手数が少なく、画面も1つで済む
+ *
+ * **全操作を userId で絞る（docs/steps/pub-1.md 設計判断 6）。**
+ * 他人の収入IDには、存在しないIDと同じ notFound を返す。
  *
  * 失敗は例外ではなく { ok: false, error } で返す。
  */
@@ -50,10 +54,11 @@ function isStorableAmount(amountYen: number): boolean {
  */
 export async function listIncomes(
   client: PrismaClient,
+  userId: UserId,
   yearMonth: string,
 ): Promise<Income[]> {
   return client.income.findMany({
-    where: { yearMonth },
+    where: { userId, yearMonth },
     orderBy: [{ createdAt: "desc" }, { id: "asc" }],
   });
 }
@@ -66,9 +71,10 @@ export type CreateIncomeInput = {
   label: string | null;
 };
 
-/** 1件追加する */
+/** その利用者の収入として1件追加する。userId は引数から設定する */
 export async function createIncome(
   client: PrismaClient,
+  userId: UserId,
   input: CreateIncomeInput,
 ): Promise<IncomeResult<Income>> {
   if (!isYearMonth(input.yearMonth)) {
@@ -80,6 +86,7 @@ export async function createIncome(
 
   const created = await client.income.create({
     data: {
+      userId,
       yearMonth: input.yearMonth,
       amountYen: input.amountYen,
       label: input.label,
@@ -95,10 +102,11 @@ export async function createIncome(
  */
 export async function deleteIncome(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<IncomeResult<null>> {
   try {
-    await client.income.delete({ where: { id } });
+    await client.income.delete({ where: { id, userId } });
     return { ok: true, value: null };
   } catch (error) {
     if (getPrismaErrorCode(error) === "P2025") {

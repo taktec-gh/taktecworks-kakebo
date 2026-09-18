@@ -6,6 +6,7 @@ import { connection } from "next/server";
 import { getCategoryDeleteBlockedReason, getCategoryDetail } from "@/lib/categories";
 import { COST_TYPE_LABELS } from "@/lib/category-validation";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 
 import { CATEGORIES_PATH } from "../action-state";
 import {
@@ -30,8 +31,10 @@ export default async function CategoryEditPage({
   params: Promise<{ id: string }>;
 }) {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
   const { id } = await params;
-  const detail = await getCategoryDetail(prisma, id);
+  const detail = await getCategoryDetail(prisma, userId, id);
   if (!detail) notFound();
 
   const { category } = detail;

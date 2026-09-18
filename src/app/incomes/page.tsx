@@ -5,6 +5,7 @@ import { connection } from "next/server";
 import { formatYen } from "@/lib/budget-calculation";
 import { listIncomes, sumIncomeAmounts } from "@/lib/incomes";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 import { formatYearMonthLabel, getCurrentYearMonth, resolveYearMonth } from "@/lib/year-month";
 
 import { YEAR_MONTH_PARAM } from "./action-state";
@@ -33,13 +34,15 @@ export default async function IncomesPage({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
 
   const params = await searchParams;
   const now = new Date();
   const currentYearMonth = getCurrentYearMonth(now);
   const yearMonth = resolveYearMonth(params[YEAR_MONTH_PARAM], now);
 
-  const incomes = await listIncomes(prisma, yearMonth);
+  const incomes = await listIncomes(prisma, userId, yearMonth);
   const totalYen = sumIncomeAmounts(incomes);
   const items: IncomeListItem[] = incomes.map((income) => ({
     id: income.id,

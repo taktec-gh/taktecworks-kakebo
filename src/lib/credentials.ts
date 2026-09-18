@@ -5,6 +5,7 @@ import {
   PASSKEY_ERRORS,
   type PasskeyResult,
 } from "@/lib/passkey";
+import type { UserId } from "@/lib/user-id";
 
 /**
  * パスキー（Credential）のデータ層。
@@ -13,6 +14,11 @@ import {
  * テストからモックを差し込めるようにするため）。このモジュールはサーバー専用で、
  * Client Component から import しないこと（publicKey / counter を
  * ブラウザへ渡さないためでもある）。
+ *
+ * **userId で絞る（docs/steps/pub-1.md 設計判断 6）。** 例外は次の2つだけ:
+ * - findCredentialByCredentialId — ログインの時点では持ち主が分からない。
+ *   認証器が返した資格情報IDで引くことが認証そのもの
+ * - updateCredentialCounter — 上の検証が通った直後に、同じ資格情報IDで更新する
  */
 
 /** Prisma のエラーコードを取り出す（src/lib/categories.ts と同じ） */
@@ -22,19 +28,23 @@ function getPrismaErrorCode(error: unknown): string | null {
   return typeof code === "string" ? code : null;
 }
 
-/** 登録順（古い順）。画面の一覧と excludeCredentials に使う */
-export async function listCredentials(client: PrismaClient): Promise<Credential[]> {
-  return client.credential.findMany({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+/** その利用者のパスキーを登録順（古い順）で。画面の一覧と excludeCredentials に使う */
+export async function listCredentials(
+  client: PrismaClient,
+  userId: UserId,
+): Promise<Credential[]> {
+  return client.credential.findMany({
+    where: { userId },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
 }
 
 /**
- * 登録件数。**パスキー必須の判定はこの件数から導く**（docs/steps/step-7.md 設計判断1）。
+ * 認証器が返した資格情報ID（base64url）で1件引く。無ければ null。
+ *
+ * **userId を取らない例外。** ログインの時点では持ち主が分からないため。
+ * 戻り値の userId が、認証成功後にセッションを発行する相手になる。
  */
-export async function countCredentials(client: PrismaClient): Promise<number> {
-  return client.credential.count();
-}
-
-/** 認証器が返した資格情報ID（base64url）で1件引く。無ければ null */
 export async function findCredentialByCredentialId(
   client: PrismaClient,
   credentialId: string,
@@ -58,14 +68,16 @@ export type CreateCredentialInput = {
   deviceName: string;
 };
 
-/** 追加する。同じ資格情報IDが登録済みなら拒否する */
+/** その利用者のパスキーとして追加する。同じ資格情報IDが登録済みなら（誰のものでも）拒否する */
 export async function createCredential(
   client: PrismaClient,
+  userId: UserId,
   input: CreateCredentialInput,
 ): Promise<PasskeyResult<Credential>> {
   try {
     const created = await client.credential.create({
       data: {
+        userId,
         credentialId: input.credentialId,
         publicKey: input.publicKey,
         counter: BigInt(input.counter),
@@ -85,6 +97,9 @@ export async function createCredential(
 /**
  * 認証成功のたびに署名カウンタと最終利用日時を更新する。
  * counter はクローン検知に使うため、認証のたびに必ず保存する。
+ *
+ * **userId を取らない例外。** findCredentialByCredentialId で引いて検証が通った直後に、
+ * 同じ資格情報IDで更新する。
  */
 export async function updateCredentialCounter(
   client: PrismaClient,
@@ -99,21 +114,19 @@ export async function updateCredentialCounter(
 }
 
 /**
- * 削除する。
+ * その利用者のパスキーを削除する。
  *
- * パスキー必須の状態（RECOVERY_MODE 未設定）では**最後の1本を消せない**。
- * 消せてしまうと二度とログインできなくなるため
- * （docs/steps/step-7.md「設計判断 2. 締め出し対策」）。
+ * **その利用者の最後の1本は消せない。** ログイン手段はパスキーだけなので、
+ * 消せてしまうと二度とログインできなくなる。件数は**その利用者の**パスキーで数える
+ * （全体の件数で判定すると、他人がパスキーを持っているだけで最後の1本を消せてしまう）。
+ *
+ * 他人のパスキーのIDには、存在しないIDと同じ notFound を返す。
  *
  * ## なぜ対話型トランザクション + Serializable なのか
  *
  * 「件数を数える → 消してよいか判断する → 消す」を別々のクエリで実行すると、
  * 削除リクエストが2つ同時に来たときに**両方が同じ件数（例: 残り2本）を見て**
- * 両方とも削除に進み、資格情報が0本になり得る。
- *
- * 0本になると shouldRequirePasskey() が false を返すので、結果は「締め出し」ではなく
- * **パスキー必須化の解除**＝パスワードだけで入れる状態への逆戻りになる。
- * つまり締め出し防止のガードそのものが競合で無効化される。
+ * 両方とも削除に進み、資格情報が0本になり得る（＝締め出し）。
  *
  * **単に $transaction で囲んでも直らない。** PostgreSQL の既定の分離レベルは
  * Read Committed で、2つのトランザクションが互いのコミット前に count() を実行すれば
@@ -124,21 +137,21 @@ export async function updateCredentialCounter(
  */
 export async function deleteCredential(
   client: PrismaClient,
+  userId: UserId,
   id: string,
-  recoveryMode: boolean,
 ): Promise<PasskeyResult<null>> {
   try {
     return await client.$transaction(
       async (tx): Promise<PasskeyResult<null>> => {
-        const target = await tx.credential.findUnique({ where: { id } });
+        const target = await tx.credential.findFirst({ where: { id, userId } });
         if (!target) return { ok: false, error: PASSKEY_ERRORS.notFound };
 
-        const totalCount = await tx.credential.count();
-        const blocked = getCredentialDeleteBlockedReason(totalCount, recoveryMode);
+        const totalCount = await tx.credential.count({ where: { userId } });
+        const blocked = getCredentialDeleteBlockedReason(totalCount);
         // ここで返しても書き込みはまだ無いので、ロールバックされて困るものは無い
         if (blocked) return { ok: false, error: blocked };
 
-        await tx.credential.delete({ where: { id } });
+        await tx.credential.delete({ where: { id, userId } });
         return { ok: true, value: null };
       },
       { isolationLevel: "Serializable" },
