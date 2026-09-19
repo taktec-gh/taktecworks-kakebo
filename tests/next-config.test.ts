@@ -8,9 +8,33 @@
 //   tester 向けの方針 5（X-Robots-Tag が残る・Referrer-Policy が no-referrer でない・
 //   Permissions-Policy がパスキーを塞いでいない・poweredByHeader が false）
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import nextConfig from "../next.config";
+import nextConfig, { parseAllowedDevOrigins } from "../next.config";
+
+describe("next.config allowedDevOrigins（環境変数 DEV_ALLOWED_ORIGINS）", () => {
+  it("未設定・空文字・空白とカンマだけなら空配列（localhost 以外を許さない）", () => {
+    expect(parseAllowedDevOrigins(undefined)).toEqual([]);
+    expect(parseAllowedDevOrigins("")).toEqual([]);
+    expect(parseAllowedDevOrigins(" , ,")).toEqual([]);
+  });
+
+  it("カンマ区切りを前後の空白を除いて配列にする", () => {
+    expect(parseAllowedDevOrigins("192.168.0.2")).toEqual(["192.168.0.2"]);
+    expect(parseAllowedDevOrigins(" 192.168.0.2 , 10.0.0.3,")).toEqual([
+      "192.168.0.2",
+      "10.0.0.3",
+    ]);
+  });
+
+  it("next.config.ts に IP アドレスを直書きしない（手元の LAN の IP を公開リポジトリに残さない）", () => {
+    const source = readFileSync(join(__dirname, "..", "next.config.ts"), "utf8");
+    expect(source).not.toMatch(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+  });
+});
 
 type HeaderEntry = { key: string; value: string };
 
