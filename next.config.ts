@@ -1,10 +1,25 @@
 import type { NextConfig } from "next";
 
+/**
+ * 環境変数 DEV_ALLOWED_ORIGINS（カンマ区切り）を allowedDevOrigins の配列にする。
+ * 未設定・空なら空配列（localhost 以外からの dev リソースへのアクセスを許さない）。
+ *
+ * 手元の LAN の IP をリポジトリに直書きしないため、値は .env（コミットしない）に置く。
+ */
+export function parseAllowedDevOrigins(value: string | undefined): string[] {
+  if (typeof value !== "string") return [];
+  return value
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+}
+
 const nextConfig: NextConfig = {
   // スマホ実機からの動作確認のため、同一LAN内のPCのIPを dev リソース（HMR等）の
   // 許可オリジンに入れる。Next.js 16 は既定で localhost 以外からのアクセスを塞ぐ。
   // 開発時のみの設定で、本番ビルドには影響しない。
-  allowedDevOrigins: ["192.168.10.113"],
+  // なお、http の LAN の IP ではパスキーは動かない（https か localhost のみ）。見た目の確認用
+  allowedDevOrigins: parseAllowedDevOrigins(process.env.DEV_ALLOWED_ORIGINS),
 
   // X-Powered-By: Next.js を出さない（使っている技術と版を外に知らせない）
   poweredByHeader: false,
