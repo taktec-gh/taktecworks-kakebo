@@ -173,6 +173,25 @@ nonce は描画のたびに入るので、**静的に生成されたページに
 | 9 | 予算バーをインラインの `style` に戻す | 落ちる |
 | 10 | `upgrade-insecure-requests` を足す | 落ちる |
 
+### 変異テストの結果（2026-09-19）
+
+**10件すべて検出。** 変異は文字列置換で1件ずつ入れ、`git diff` で入ったことを確認してから全テスト（2914件）を流し、戻した（最後に `src/` / `prisma/` / `next.config.ts` の未コミット変更が無いことを確認）。
+
+| # | 落ちた件数 | 検出したテスト |
+|---|---|---|
+| 1 | 5 | `csp.test.ts`（本番の全文、unsafe-inline / unsafe-eval が無い）、`proxy.test.ts`（公開パス・リダイレクトのポリシーに緩みが無い） |
+| 2 | 12 | `csp.test.ts` の `isDevelopmentEnv`、`proxy.test.ts`「開発だけ緩める条件」（test・未設定・空文字・大文字違い） |
+| 3 | 3 | `csp.test.ts`「呼ぶたびに異なる値」、`proxy.test.ts`「2回のリクエストで nonce が異なる」（公開パス・リダイレクト） |
+| 4 | 12 | `proxy.test.ts`（公開パス3種でリクエストとレスポンスの両方に CSP、ほか） |
+| 5 | 4 | `proxy.test.ts`（セッション無し・改竄 Cookie のリダイレクトに CSP） |
+| 6 | 4 | `proxy.test.ts`（通す分岐でリクエストヘッダにも CSP、nonce が一致） |
+| 7 | 5 | `csp.test.ts`（本番の全文、`frame-ancestors 'none'` がある）、`proxy.test.ts` |
+| 8 | 1 | `next-config.test.ts`「Referrer-Policy: strict-origin-when-cross-origin（no-referrer にしない）」 |
+| 9 | 3 | `no-inline-style.test.ts`（`src/` の走査）、`dashboard-progress-list.test.tsx`（幅・style 属性が無い） |
+| 10 | 5 | `csp.test.ts`（本番・開発の全文、`upgrade-insecure-requests` が無い）、`proxy.test.ts` |
+
+- **#8 は1ケースだけが検出している。** `no-referrer` で Server Actions が壊れるかは実機確認（フォームの送信）でも見る
+
 ---
 
 ## 実機確認

@@ -4,8 +4,14 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SESSION_COOKIE_NAME, createSessionToken } from "@/lib/auth";
+import {
+  CRON_CLEANUP_PATH,
+  SESSION_COOKIE_NAME,
+  SIGNUP_PATH,
+  createSessionToken,
+} from "@/lib/auth";
 import { config, proxy } from "@/proxy";
+import { CSP_HEADER_NAME, isValidNonce, NONCE_HEADER_NAME } from "@/lib/csp";
 import type { UserId } from "@/lib/user-id";
 
 const SECRET = "test-auth-secret-0123456789abcdef";
@@ -53,6 +59,20 @@ function tamperSignature(signature: string): string {
     throw new Error("tamperSignature: バイト列が変化していません（テスト側の不備）");
   }
   return tampered;
+}
+
+/** CSP 文字列から `'nonce-…'` の値だけを取り出す */
+function extractNonce(csp: string): string {
+  const match = csp.match(/'nonce-([^']+)'/);
+  expect(match, `CSP に nonce が見つかりません: ${csp}`).not.toBeNull();
+  return match![1];
+}
+
+/** CSP 文字列から指定ディレクティブの値部分だけを取り出す（tests/lib/csp.test.ts と同じ考え方） */
+function extractDirective(csp: string, name: string): string {
+  const directive = csp.split("; ").find((d) => d.startsWith(`${name} `) || d === name);
+  expect(directive, `ディレクティブ ${name} が見つかりません: ${csp}`).not.toBeUndefined();
+  return directive!;
 }
 
 beforeEach(() => {
@@ -189,5 +209,158 @@ describe("matcher 設定", () => {
     for (const pathname of ["/_next/static/chunks/main.js", "/_next/image", "/favicon.ico"]) {
       expect(matcher.test(pathname)).toBe(false);
     }
+  });
+});
+
+// docs/steps/pub-4.md 設計判断 1・tester 向けの方針 3・4:
+// proxy の全分岐（公開パス／セッションあり／セッション無しのリダイレクト／
+// 改竄 Cookie の削除を伴うリダイレクト）に CSP が付くこと、通す分岐では
+// リクエストヘッダ（Next.js が nonce を読む）とレスポンスヘッダの nonce が一致することを確認する。
+//
+// NextResponse.next({ request: { headers } }) はリクエストヘッダの上書きを
+// `x-middleware-request-<header名>` というレスポンスヘッダとして表現する
+// （node_modules/next/dist/server/web/spec-extension/response.js の handleMiddlewareField）。
+// これを読むことで「リクエストヘッダにも CSP と x-nonce が転送されているか」を検証できる。
+describe("CSP ヘッダー", () => {
+  describe("本番相当（NODE_ENV=production）", () => {
+    beforeEach(() => {
+      vi.stubEnv("NODE_ENV", "production");
+    });
+
+    it.each([
+      ["公開パス(/login)", "/login", undefined],
+      ["公開パス(サインアップ)", SIGNUP_PATH, undefined],
+      ["公開パス(cron cleanup)", CRON_CLEANUP_PATH, undefined],
+    ])("%s は通す分岐で、レスポンスと転送されたリクエストヘッダの両方に CSP が付く", async (_label, pathname) => {
+      const response = await proxy(requestFor(pathname));
+      expectPassedThrough(response);
+
+      const responseCsp = response.headers.get(CSP_HEADER_NAME);
+      expect(responseCsp, "レスポンスに CSP が無い").not.toBeNull();
+
+      const requestCsp = response.headers.get(`x-middleware-request-${CSP_HEADER_NAME.toLowerCase()}`);
+      const requestNonceHeader = response.headers.get(`x-middleware-request-${NONCE_HEADER_NAME}`);
+      expect(requestCsp, "Next.js が nonce を読み取るリクエストヘッダに CSP が無い").not.toBeNull();
+      expect(requestNonceHeader, "リクエストヘッダに x-nonce が無い").not.toBeNull();
+
+      // レスポンスの CSP とリクエストヘッダの CSP は同じ nonce を使っている
+      expect(requestCsp).toBe(responseCsp);
+      const nonce = extractNonce(responseCsp!);
+      expect(requestNonceHeader).toBe(nonce);
+      expect(isValidNonce(nonce)).toBe(true);
+    });
+
+    it("セッションありは通す分岐で CSP をリクエスト・レスポンス両方に付け、nonce が一致する", async () => {
+      const token = await createSessionToken(SECRET, USER_ID);
+      const response = await proxy(requestFor("/", token));
+      expectPassedThrough(response);
+
+      const responseCsp = response.headers.get(CSP_HEADER_NAME);
+      const requestCsp = response.headers.get(`x-middleware-request-${CSP_HEADER_NAME.toLowerCase()}`);
+      const requestNonceHeader = response.headers.get(`x-middleware-request-${NONCE_HEADER_NAME}`);
+      expect(responseCsp).not.toBeNull();
+      expect(requestCsp).toBe(responseCsp);
+      expect(requestNonceHeader).toBe(extractNonce(responseCsp!));
+    });
+
+    it("セッション無しのリダイレクトにも CSP が付く", async () => {
+      const response = await proxy(requestFor("/"));
+      expectRedirectedToLogin(response);
+      const csp = response.headers.get(CSP_HEADER_NAME);
+      expect(csp).not.toBeNull();
+      expect(isValidNonce(extractNonce(csp!))).toBe(true);
+    });
+
+    it("改竄 Cookie の削除を伴うリダイレクトにも CSP が付く", async () => {
+      const token = await createSessionToken(SECRET, USER_ID);
+      const [header, payload, signature] = token.split(".");
+      const tamperedSignature = tamperSignature(signature);
+      const tampered = `${header}.${payload}.${tamperedSignature}`;
+
+      const response = await proxy(requestFor("/", tampered));
+      expectRedirectedToLogin(response);
+      // Cookie 削除ヘッダと CSP ヘッダが両方付いていることを確認する（片方の実装漏れを検出する）
+      expect(response.headers.get("set-cookie")).toContain(`${SESSION_COOKIE_NAME}=;`);
+      const csp = response.headers.get(CSP_HEADER_NAME);
+      expect(csp).not.toBeNull();
+      expect(isValidNonce(extractNonce(csp!))).toBe(true);
+    });
+
+    it("公開パスのポリシーに緩みが無い（unsafe-inline・unsafe-eval・ワイルドカード・スキーム許可が script-src に無い）", async () => {
+      const response = await proxy(requestFor("/login"));
+      const csp = response.headers.get(CSP_HEADER_NAME)!;
+      const scriptSrc = extractDirective(csp, "script-src");
+      expect(scriptSrc).not.toMatch(/unsafe-inline|unsafe-eval|\*|https:|http:/);
+      expect(scriptSrc).toContain("'strict-dynamic'");
+      expect(extractDirective(csp, "style-src")).not.toContain("unsafe-inline");
+      expect(csp).toContain("object-src 'none'");
+      expect(csp).toContain("base-uri 'self'");
+      expect(csp).toContain("form-action 'self'");
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(csp).not.toContain("upgrade-insecure-requests");
+    });
+
+    it("セッション無しのリダイレクトのポリシーにも緩みが無い", async () => {
+      const response = await proxy(requestFor("/"));
+      const csp = response.headers.get(CSP_HEADER_NAME)!;
+      expect(extractDirective(csp, "script-src")).not.toMatch(/unsafe-inline|unsafe-eval/);
+      expect(csp).toContain("frame-ancestors 'none'");
+    });
+
+    it("2回のリクエストで nonce が異なる（公開パス）", async () => {
+      const first = await proxy(requestFor("/login"));
+      const second = await proxy(requestFor("/login"));
+      const nonce1 = extractNonce(first.headers.get(CSP_HEADER_NAME)!);
+      const nonce2 = extractNonce(second.headers.get(CSP_HEADER_NAME)!);
+      expect(nonce1).not.toBe(nonce2);
+    });
+
+    it("2回のリクエストで nonce が異なる（未認証のリダイレクト）", async () => {
+      const first = await proxy(requestFor("/"));
+      const second = await proxy(requestFor("/"));
+      const nonce1 = extractNonce(first.headers.get(CSP_HEADER_NAME)!);
+      const nonce2 = extractNonce(second.headers.get(CSP_HEADER_NAME)!);
+      expect(nonce1).not.toBe(nonce2);
+    });
+  });
+
+  describe("開発だけ緩める条件", () => {
+    it("NODE_ENV=development のときだけ script-src に 'unsafe-eval'、style-src に 'unsafe-inline' が入る", async () => {
+      vi.stubEnv("NODE_ENV", "development");
+      const response = await proxy(requestFor("/login"));
+      const csp = response.headers.get(CSP_HEADER_NAME)!;
+      expect(extractDirective(csp, "script-src")).toContain("'unsafe-eval'");
+      expect(extractDirective(csp, "style-src")).toContain("'unsafe-inline'");
+    });
+
+    it.each([
+      ["production", "production"],
+      ["test", "test"],
+      ["未設定", undefined],
+      ["空文字", ""],
+      ["先頭が大文字(Development)", "Development"],
+      ["全部大文字(DEVELOPMENT)", "DEVELOPMENT"],
+    ])("NODE_ENV が %s では緩まない（「production でなければ緩める」にしない）", async (_label, value) => {
+      vi.stubEnv("NODE_ENV", value);
+      const response = await proxy(requestFor("/login"));
+      const csp = response.headers.get(CSP_HEADER_NAME)!;
+      expect(extractDirective(csp, "script-src")).not.toContain("unsafe-eval");
+      expect(extractDirective(csp, "style-src")).not.toContain("unsafe-inline");
+    });
+  });
+
+  describe("認証の判断は CSP と無関係（Step 3 までと変わらない）", () => {
+    it("CSP を付けても、セッション無しは通さずリダイレクトのまま", async () => {
+      vi.stubEnv("NODE_ENV", "production");
+      const response = await proxy(requestFor("/expenses"));
+      expectRedirectedToLogin(response);
+    });
+
+    it("CSP を付けても、有効なセッションは通す", async () => {
+      vi.stubEnv("NODE_ENV", "production");
+      const token = await createSessionToken(SECRET, USER_ID);
+      const response = await proxy(requestFor("/expenses", token));
+      expectPassedThrough(response);
+    });
   });
 });
