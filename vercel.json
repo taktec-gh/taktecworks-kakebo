@@ -4,5 +4,11 @@
         "main": true,
         "*": false
         }
-    }
+    },
+    "crons": [
+        {
+            "path": "/api/cron/cleanup",
+            "schedule": "0 18 * * *"
+        }
+    ]
 }

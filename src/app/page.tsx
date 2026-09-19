@@ -9,15 +9,18 @@ import {
   summarizeIncomes,
 } from "@/lib/dashboard";
 import { getDashboardData } from "@/lib/dashboard-data";
+import { formatDemoExpiresAtLabel } from "@/lib/demo-data";
 import { getCurrentDate } from "@/lib/expense-date";
 import { summarizeExpenses } from "@/lib/expense-summary";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/session";
+import { findDemoExpiresAt } from "@/lib/users";
 import { getCurrentYearMonth, resolveYearMonth } from "@/lib/year-month";
 
 import { logoutAction } from "./(auth)/login/actions";
 import { YEAR_MONTH_PARAM } from "./dashboard-path";
 import { DashboardView } from "./dashboard-view";
+import { DemoBanner } from "./demo-banner";
 
 /**
  * ダッシュボード（＝アプリのトップ画面）。
@@ -48,7 +51,11 @@ export default async function HomePage({
   const yearMonth = resolveYearMonth(params[YEAR_MONTH_PARAM], now);
   const progress = getMonthProgress(yearMonth, getCurrentDate(now));
 
-  const data = await getDashboardData(prisma, userId, yearMonth);
+  const [data, demoExpiresAt] = await Promise.all([
+    getDashboardData(prisma, userId, yearMonth),
+    // デモかどうかは DB の値で判定する（docs/steps/pub-3.md 設計判断 9）
+    findDemoExpiresAt(prisma, userId),
+  ]);
 
   const summary = buildDashboardSummary({
     paymentSources: data.paymentSources,
@@ -70,6 +77,10 @@ export default async function HomePage({
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col gap-5 px-4 py-6">
       <h1 className="text-2xl font-bold">家計簿</h1>
+
+      {demoExpiresAt ? (
+        <DemoBanner expiresAtLabel={formatDemoExpiresAtLabel(demoExpiresAt)} />
+      ) : null}
 
       <DashboardView
         yearMonth={yearMonth}

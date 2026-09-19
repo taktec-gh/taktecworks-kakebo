@@ -7,6 +7,7 @@ import {
 import { revalidatePath } from "next/cache";
 
 import { createCredential, deleteCredential, listCredentials } from "@/lib/credentials";
+import { DEMO_PASSKEY_BLOCKED_MESSAGE } from "@/lib/demo-messages";
 import {
   getRpConfig,
   PASSKEY_ERRORS,
@@ -19,7 +20,8 @@ import {
 import { consumeChallengeCookie, setChallengeCookie } from "@/lib/passkey-session";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/session";
-import { findWebauthnUserId } from "@/lib/users";
+import type { UserId } from "@/lib/user-id";
+import { findDemoExpiresAt, findWebauthnUserId } from "@/lib/users";
 import { getPasskeyDisplayName, webauthnUserIdToBytes } from "@/lib/webauthn-user-id";
 
 import { PASSKEYS_PATH, type PasskeyActionState } from "./action-state";
@@ -35,7 +37,15 @@ import type { RegistrationResponseJSON } from "@simplewebauthn/server";
  *
  * ログイン画面と違い、**ここでは失敗の理由を出してよい**
  * （すでにログインしている本人しか到達しないため。docs/steps/step-7.md「画面」）。
+ *
+ * **デモユーザーは登録できない**（docs/steps/pub-3.md 設計判断 7）。開始・完了の両方で、
+ * DB の demoExpiresAt を userId で絞って取得して判定する（Server Action は直接叩けるため、画面の表示に頼らない）。
  */
+
+/** その利用者がデモユーザーか（DB の demoExpiresAt で判定。`where: { id: userId }`） */
+async function isDemoUser(userId: UserId): Promise<boolean> {
+  return (await findDemoExpiresAt(prisma, userId)) !== null;
+}
 
 /**
  * 登録用オプションを作り、チャレンジを短命 Cookie に置く。
@@ -49,6 +59,9 @@ import type { RegistrationResponseJSON } from "@simplewebauthn/server";
  */
 export async function startPasskeyRegistrationAction(): Promise<PasskeyRegistrationOptionsResult> {
   const userId = await requireUserId();
+
+  // デモユーザーはパスキーを登録できない（pub-3.md 設計判断 7）。画面の表示に頼らず DB の値で判定する
+  if (await isDemoUser(userId)) return { ok: false, error: DEMO_PASSKEY_BLOCKED_MESSAGE };
 
   let rpConfig: ReturnType<typeof getRpConfig>;
   try {
@@ -97,6 +110,9 @@ export async function finishPasskeyRegistrationAction(
   deviceName: string,
 ): Promise<PasskeyVerificationResult> {
   const userId = await requireUserId();
+
+  // 開始を経ずに直接叩かれても、デモユーザーには資格情報を作らない（pub-3.md 設計判断 7）
+  if (await isDemoUser(userId)) return { ok: false, error: DEMO_PASSKEY_BLOCKED_MESSAGE };
 
   const validatedName = validateDeviceName(deviceName);
   if (!validatedName.ok) return { ok: false, error: validatedName.error };
