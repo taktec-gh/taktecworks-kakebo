@@ -12,6 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEMO_PASSKEY_BLOCKED_MESSAGE } from "@/lib/demo-messages";
 import { createChallengeToken } from "@/lib/passkey";
 import { PASSKEY_ERRORS } from "@/lib/passkey-messages";
 import type { UserId } from "@/lib/user-id";
@@ -102,9 +103,12 @@ vi.mock("@/lib/credentials", () => ({
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 
 // ---- @/lib/users のモック（webauthnUserId の取得。docs/steps/pub-2.md 設計判断 3・7）----
+// findDemoExpiresAt はデモユーザーの拒否判定に使う（docs/steps/pub-3.md 設計判断 7）
 const findWebauthnUserId = vi.fn();
+const findDemoExpiresAt = vi.fn();
 vi.mock("@/lib/users", () => ({
   findWebauthnUserId: (...args: unknown[]) => findWebauthnUserId(...args),
+  findDemoExpiresAt: (...args: unknown[]) => findDemoExpiresAt(...args),
 }));
 
 const USER_WEBAUTHN_USER_ID = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
@@ -182,6 +186,9 @@ beforeEach(() => {
   deleteCredential.mockResolvedValue({ ok: true, value: null });
   findWebauthnUserId.mockReset();
   findWebauthnUserId.mockResolvedValue(USER_WEBAUTHN_USER_ID);
+  findDemoExpiresAt.mockReset();
+  // 既定は通常ユーザー（デモではない）。docs/steps/pub-3.md 設計判断7
+  findDemoExpiresAt.mockResolvedValue(null);
 
   vi.stubEnv("AUTH_SECRET", SECRET);
   vi.stubEnv("RP_ID", RP_ID);
@@ -222,6 +229,66 @@ describe("要ログイン", () => {
       deletePasskeyAction(initialPasskeyActionState, formDataOf({ id: "cred_1" })),
     ).rejects.toThrow("NEXT_REDIRECT");
     expect(deleteCredential).not.toHaveBeenCalled();
+  });
+});
+
+describe("デモユーザーの拒否（docs/steps/pub-3.md 設計判断7。画面の表示に頼らず DB の demoExpiresAt で判定する）", () => {
+  it("startPasskeyRegistrationAction: デモユーザーなら DEMO_PASSKEY_BLOCKED_MESSAGE を返し、以降の処理（listCredentials 等）を呼ばない", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+
+    const result = await startPasskeyRegistrationAction();
+
+    expect(result).toEqual({ ok: false, error: DEMO_PASSKEY_BLOCKED_MESSAGE });
+    expect(findWebauthnUserId).not.toHaveBeenCalled();
+    expect(listCredentials).not.toHaveBeenCalled();
+    expect(generateRegistrationOptions).not.toHaveBeenCalled();
+  });
+
+  it("startPasskeyRegistrationAction: findDemoExpiresAt は requireUserId が返した userId で呼ぶ（where: { id: userId }。設計判断7）", async () => {
+    await startPasskeyRegistrationAction();
+    expect(findDemoExpiresAt).toHaveBeenCalledWith(expect.anything(), USER_ID);
+  });
+
+  it("startPasskeyRegistrationAction: 通常ユーザー（demoExpiresAt が null）なら拒否されない", async () => {
+    findDemoExpiresAt.mockResolvedValue(null);
+    const result = await startPasskeyRegistrationAction();
+    expect(result.ok).toBe(true);
+  });
+
+  it("finishPasskeyRegistrationAction: デモユーザーなら、有効なチャレンジがあっても DEMO_PASSKEY_BLOCKED_MESSAGE を返し、資格情報を作らない", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+    const token = await createChallengeToken("CHALLENGE", "register", SECRET);
+    cookieStore.set("kakeibo_passkey_register", { name: "kakeibo_passkey_register", value: token });
+
+    const result = await finishPasskeyRegistrationAction(regResponse, "iPhone");
+
+    expect(result).toEqual({ ok: false, error: DEMO_PASSKEY_BLOCKED_MESSAGE });
+    expect(createCredential).not.toHaveBeenCalled();
+    expect(verifyRegistrationResponse).not.toHaveBeenCalled();
+  });
+
+  it("finishPasskeyRegistrationAction: チャレンジ Cookie が無くても（開始を経ずに直接叩かれても）デモユーザーなら拒否する", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+
+    const result = await finishPasskeyRegistrationAction(regResponse, "iPhone");
+
+    expect(result).toEqual({ ok: false, error: DEMO_PASSKEY_BLOCKED_MESSAGE });
+    expect(createCredential).not.toHaveBeenCalled();
+  });
+
+  it("finishPasskeyRegistrationAction: findDemoExpiresAt は requireUserId が返した userId で呼ぶ", async () => {
+    await finishPasskeyRegistrationAction(regResponse, "iPhone").catch(() => {});
+    expect(findDemoExpiresAt).toHaveBeenCalledWith(expect.anything(), USER_ID);
+  });
+
+  it("finishPasskeyRegistrationAction: 通常ユーザーなら（他の失敗が無ければ）拒否されない", async () => {
+    findDemoExpiresAt.mockResolvedValue(null);
+    const token = await createChallengeToken("CHALLENGE", "register", SECRET);
+    cookieStore.set("kakeibo_passkey_register", { name: "kakeibo_passkey_register", value: token });
+
+    const result = await finishPasskeyRegistrationAction(regResponse, "iPhone");
+
+    expect(result).toEqual({ ok: true });
   });
 });
 

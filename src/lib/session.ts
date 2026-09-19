@@ -17,11 +17,32 @@ import type { UserId } from "@/lib/user-id";
  * Server Component / Server Action / Route Handler からのみ呼べる。
  */
 
+export type CreateSessionOptions = {
+  /**
+   * 有効期間（秒）。JWT の exp（= iat + maxAgeSeconds）と Cookie の maxAge の両方に使う。
+   * 既定は SESSION_MAX_AGE_SECONDS（30日。通常のユーザー）。
+   * デモユーザーは demoExpiresAt までの秒数を渡す（docs/steps/pub-3.md 設計判断 2）
+   */
+  maxAgeSeconds?: number;
+  /** 発行時刻（JWT の iat）。既定は現在時刻 */
+  now?: Date;
+};
+
 /** そのユーザーのセッション Cookie を発行する */
-export async function createSession(userId: UserId): Promise<void> {
-  const token = await createSessionToken(getAuthSecret(), userId);
+export async function createSession(
+  userId: UserId,
+  options: CreateSessionOptions = {},
+): Promise<void> {
+  const token = await createSessionToken(getAuthSecret(), userId, {
+    now: options.now,
+    maxAgeSeconds: options.maxAgeSeconds,
+  });
   const cookieStore = await cookies();
-  cookieStore.set(SESSION_COOKIE_NAME, token, getSessionCookieOptions());
+  cookieStore.set(
+    SESSION_COOKIE_NAME,
+    token,
+    getSessionCookieOptions({ maxAgeSeconds: options.maxAgeSeconds }),
+  );
 }
 
 /** 現在のセッションを取得する。未ログイン・改竄・期限切れなら null */

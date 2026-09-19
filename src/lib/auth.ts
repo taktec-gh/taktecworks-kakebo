@@ -192,15 +192,22 @@ export const LOGIN_PATH = "/login";
 /** サインアップ画面。実体は src/lib/signup-messages.ts（Client Component からも読むため） */
 export { SIGNUP_PATH } from "@/lib/signup-messages";
 
+/** 期限切れのデモユーザーなどを消す定期処理（Vercel Cron）の Route Handler */
+export const CRON_CLEANUP_PATH = "/api/cron/cleanup";
+
 /**
  * 認証なしでアクセスしてよいパス（完全一致）。
  *
  * SIGNUP_PATH は**完全一致だけ**で公開する。接頭辞一致にすると /signupx や /signup-admin まで
  * 公開になる（docs/steps/pub-2.md 設計判断 6）。
+ *
+ * CRON_CLEANUP_PATH も**完全一致だけ**。`/api/cron/` の接頭辞にしない（docs/steps/pub-3.md 設計判断 5）。
+ * このパスは Route Handler 自身が CRON_SECRET で認証する。
  */
 const PUBLIC_PATHS = new Set<string>([
   LOGIN_PATH,
   SIGNUP_PATH,
+  CRON_CLEANUP_PATH,
   "/favicon.ico",
   "/robots.txt",
   "/sitemap.xml",
@@ -213,7 +220,8 @@ const PUBLIC_PREFIXES = ["/_next/", "/icon", "/apple-icon", "/opengraph-image", 
 
 /**
  * 認証不要なパスかどうか。
- * ログイン・サインアップのページと静的アセットのみ true。それ以外（"/" を含む）は保護対象。
+ * ログイン・サインアップのページ、定期処理の Route Handler（自身で認証する）、静的アセットのみ true。
+ * それ以外（"/" を含む）は保護対象。
  */
 export function isPublicPath(pathname: string): boolean {
   if (PUBLIC_PATHS.has(pathname)) return true;

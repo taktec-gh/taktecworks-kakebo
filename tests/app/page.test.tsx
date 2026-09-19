@@ -52,6 +52,12 @@ vi.mock("@/lib/dashboard-data", () => ({
     getDashboardDataMock(client, userId, yearMonth),
 }));
 
+// デモ表示の判定（docs/steps/pub-3.md 設計判断 9）。既定は null（通常ユーザー・デモ表示なし）
+const findDemoExpiresAtMock = vi.fn<(client: unknown, userId: UserId) => Promise<Date | null>>();
+vi.mock("@/lib/users", () => ({
+  findDemoExpiresAt: (client: unknown, userId: UserId) => findDemoExpiresAtMock(client, userId),
+}));
+
 const { default: HomePage } = await import("@/app/page");
 const { MIN_YEAR_MONTH } = await import("@/lib/year-month");
 const { PaymentSourceType, WasteTag, CostType } = await import("@/generated/prisma/enums");
@@ -60,6 +66,11 @@ const { BUDGETS_PATH } = await import("@/app/budgets/action-state");
 const { INCOMES_PATH } = await import("@/app/incomes/action-state");
 const { PAYMENT_SOURCES_PATH } = await import("@/app/settings/payment-sources/action-state");
 const { CATEGORIES_PATH } = await import("@/app/settings/categories/action-state");
+
+beforeEach(() => {
+  findDemoExpiresAtMock.mockReset();
+  findDemoExpiresAtMock.mockResolvedValue(null);
+});
 
 afterEach(() => {
   cleanup();
@@ -461,5 +472,48 @@ describe("主要な画面へのリンクとログアウト", () => {
     const jsx = await HomePage({ searchParams: Promise.resolve({}) });
     render(jsx);
     expect(screen.getByRole("button", { name: "ログアウト" })).toBeInTheDocument();
+  });
+});
+
+// デモアカウントの表示（docs/steps/pub-3.md 設計判断 9「表示の判定は DB の demoExpiresAt で行う」）。
+// 通常ユーザーの画面は変えない（同 設計判断9）ことを、既定 null（上の beforeEach）で
+// これまでの全テストが引き続き通ることでも裏付けている。
+describe("デモアカウントの表示（設計判断9）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T00:00:00.000Z"));
+    getDashboardDataMock.mockReset();
+    getDashboardDataMock.mockResolvedValue(emptyDashboardData("2026-08"));
+  });
+
+  it("findDemoExpiresAt が非null（デモユーザー）なら、デモである旨と削除日時を出す", async () => {
+    findDemoExpiresAtMock.mockResolvedValue(new Date("2026-08-15T09:00:00.000Z"));
+    const { formatDemoExpiresAtLabel } = await import("@/lib/demo-data");
+
+    const jsx = await HomePage({ searchParams: Promise.resolve({}) });
+    render(jsx);
+
+    expect(screen.getByText("これはデモアカウントです")).toBeInTheDocument();
+    expect(
+      screen.getByText(formatDemoExpiresAtLabel(new Date("2026-08-15T09:00:00.000Z")), {
+        exact: false,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("findDemoExpiresAt が null（通常ユーザー）ならデモ表示を出さない", async () => {
+    findDemoExpiresAtMock.mockResolvedValue(null);
+
+    const jsx = await HomePage({ searchParams: Promise.resolve({}) });
+    render(jsx);
+
+    expect(screen.queryByText("これはデモアカウントです")).not.toBeInTheDocument();
+  });
+
+  it("findDemoExpiresAt は requireUserId が返した userId で呼ぶ", async () => {
+    const jsx = await HomePage({ searchParams: Promise.resolve({}) });
+    render(jsx);
+
+    expect(findDemoExpiresAtMock).toHaveBeenCalledWith(expect.anything(), USER_ID);
   });
 });

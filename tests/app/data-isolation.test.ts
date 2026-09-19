@@ -992,6 +992,31 @@ const ISOLATION_TABLE: IsolationCase[] = [
       );
     },
   },
+  // デモ（docs/steps/pub-3.md）もログイン前の操作で、サインアップと同じく「Aのセッションで…」
+  // という分離の枠組み自体が当てはまらない。絶対条件（design-decisions.md 決定事項2）は
+  // 「デモ用の入口は、デモ用に作ったユーザー以外のセッションを発行できないように作る」こと。
+  // FormData にユーザーIDらしき値を入れても使わないこと・セッションは createDemoUser の
+  // 戻り値のユーザーにだけ発行されることが既存テストで検証済みであることを確認する
+  // （docs/steps/pub-3.md「tester 向けの方針」3・13）。
+  {
+    action: "startDemoAction",
+    file: "src/app/(auth)/login/actions.ts",
+    target: "（未ログイン。DB には createDemoUser が今作ったデモユーザー以外何も触らない）",
+    operation: "デモアカウントの作成とセッション発行",
+    scenario:
+      "FormData にユーザーIDらしき値を入れて呼んでも無視され、セッションは createDemoUser の" +
+      "戻り値のユーザーにだけ発行されることが既存テストで検証済みであることを確認する",
+    run: async () => {
+      const content = readFileSync(
+        join(REPO_ROOT, "tests", "app", "(auth)", "login", "actions.test.ts"),
+        "utf8",
+      );
+      expect(content).toContain(
+        "FormData を伴って呼ばれても（useActionState 経由を模して）無視され、createDemoUser の戻り値のユーザーにだけセッションを発行する",
+      );
+      expect(content).toContain("セッションは createDemoUser の戻り値の userId にだけ発行される");
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------

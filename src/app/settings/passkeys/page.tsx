@@ -3,10 +3,11 @@ import Link from "next/link";
 import { connection } from "next/server";
 
 import { listCredentials } from "@/lib/credentials";
+import { DEMO_PASSKEY_BLOCKED_MESSAGE } from "@/lib/demo-messages";
 import { formatDateFullLabel, getCurrentDate } from "@/lib/expense-date";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/session";
-import { findWebauthnUserId } from "@/lib/users";
+import { findDemoExpiresAt, findWebauthnUserId } from "@/lib/users";
 import { getPasskeyDisplayName } from "@/lib/webauthn-user-id";
 
 import { deletePasskeyAction, finishPasskeyRegistrationAction, startPasskeyRegistrationAction } from "./actions";
@@ -24,6 +25,9 @@ export const metadata: Metadata = {
  * connection() でプリレンダリングを止める。この画面は常に DB の最新状態を出す必要があり、
  * ビルド時に DB へ接続させないため。
  *
+ * **デモユーザーには登録フォームの代わりに説明を出す**（docs/steps/pub-3.md 設計判断 7）。
+ * 表示名と別端末の案内（登録を促す文言）もデモユーザーには出さない。
+ *
  * **1本しか無いときは追加登録を促す。** 1台を失うと締め出されるため
  * （docs/steps/step-7.md「設計判断 2. 締め出し対策」）。
  */
@@ -38,10 +42,13 @@ export default async function PasskeysPage() {
   // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
   const userId = await requireUserId();
 
-  const [credentials, webauthnUserId] = await Promise.all([
+  const [credentials, webauthnUserId, demoExpiresAt] = await Promise.all([
     listCredentials(prisma, userId),
     findWebauthnUserId(prisma, userId),
+    // デモユーザーには登録フォームの代わりに説明を出す（docs/steps/pub-3.md 設計判断 7）。判定は DB の値
+    findDemoExpiresAt(prisma, userId),
   ]);
+  const isDemo = demoExpiresAt !== null;
   // パスキーの選択画面に出る表示名。同じ端末に複数のアカウントがあるときに見分けるため
   const accountDisplayName = webauthnUserId ? getPasskeyDisplayName(webauthnUserId) : null;
   // publicKey / counter はクライアントへ渡さない
@@ -59,7 +66,7 @@ export default async function PasskeysPage() {
           ← ホーム
         </Link>
         <h1 className="text-xl font-bold">パスキー</h1>
-        {accountDisplayName ? (
+        {accountDisplayName && !isDemo ? (
           <p className="text-sm">
             このアカウントの表示名:{" "}
             <span className="font-semibold">
@@ -71,10 +78,12 @@ export default async function PasskeysPage() {
             </span>
           </p>
         ) : null}
-        <p className="text-sm opacity-70">
-          別の端末でも使うには、その端末でログインしてから（スマホのパスキーを QR コードで使ってログインできます）、この画面で「この端末を登録」を押してください。
-          別の端末で新しくアカウントを作ると、別のアカウントになります。
-        </p>
+        {isDemo ? null : (
+          <p className="text-sm opacity-70">
+            別の端末でも使うには、その端末でログインしてから（スマホのパスキーを QR コードで使ってログインできます）、この画面で「この端末を登録」を押してください。
+            別の端末で新しくアカウントを作ると、別のアカウントになります。
+          </p>
+        )}
       </header>
 
       <PasskeyList items={items} deleteAction={deletePasskeyAction} />
@@ -89,10 +98,16 @@ export default async function PasskeysPage() {
 
       <section className="flex flex-col gap-3 border-t border-black/10 pt-5 dark:border-white/15">
         <h2 className="text-base font-semibold">この端末を登録</h2>
-        <PasskeyRegisterForm
-          start={startPasskeyRegistrationAction}
-          finish={finishPasskeyRegistrationAction}
-        />
+        {isDemo ? (
+          <p className="rounded-lg border border-amber-500/60 px-4 py-3 text-sm">
+            {DEMO_PASSKEY_BLOCKED_MESSAGE}
+          </p>
+        ) : (
+          <PasskeyRegisterForm
+            start={startPasskeyRegistrationAction}
+            finish={finishPasskeyRegistrationAction}
+          />
+        )}
       </section>
     </main>
   );

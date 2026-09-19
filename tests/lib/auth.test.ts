@@ -23,6 +23,7 @@ import { SignJWT, generateKeyPair } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CRON_CLEANUP_PATH,
   LOGIN_ERROR_MESSAGE,
   LOGIN_PATH,
   SESSION_COOKIE_NAME,
@@ -520,6 +521,33 @@ describe("isPublicPath", () => {
     it("大文字小文字を区別する", () => {
       expect(isPublicPath("/SIGNUP")).toBe(false);
       expect(isPublicPath("/Signup")).toBe(false);
+    });
+  });
+
+  describe("/api/cron/cleanup（docs/steps/pub-3.md 設計判断 5。完全一致だけで公開する）", () => {
+    it("CRON_CLEANUP_PATH の値は /api/cron/cleanup", () => {
+      expect(CRON_CLEANUP_PATH).toBe("/api/cron/cleanup");
+    });
+
+    it('"/api/cron/cleanup" は公開（Route Handler 自身が CRON_SECRET で認証する）', () => {
+      expect(isPublicPath("/api/cron/cleanup")).toBe(true);
+      expect(isPublicPath(CRON_CLEANUP_PATH)).toBe(true);
+    });
+
+    it("接頭辞一致で広げない: /api/cron/ 配下の他のパスは公開でない（変異テスト#12）", () => {
+      // 変異テスト#12（isPublicPath で /api/cron/ を startsWith にする）が入ると
+      // これらが true になってしまうため、必ず false であることを確認する
+      expect(isPublicPath("/api/cron/cleanupx")).toBe(false);
+      expect(isPublicPath("/api/cron/other")).toBe(false);
+      expect(isPublicPath("/api/cron/")).toBe(false);
+      expect(isPublicPath("/api/cron")).toBe(false);
+      expect(isPublicPath("/api/cron/cleanup/")).toBe(false);
+      expect(isPublicPath("/api/cron/cleanup/extra")).toBe(false);
+    });
+
+    it("大文字小文字を区別する", () => {
+      expect(isPublicPath("/API/CRON/CLEANUP")).toBe(false);
+      expect(isPublicPath("/api/Cron/cleanup")).toBe(false);
     });
   });
 });

@@ -16,6 +16,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEMO_PASSKEY_BLOCKED_MESSAGE } from "@/lib/demo-messages";
 import { getPasskeyDisplayName } from "@/lib/webauthn-user-id";
 
 import type { Credential } from "@/generated/prisma/client";
@@ -36,11 +37,14 @@ vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 
 const listCredentials = vi.fn<() => Promise<Credential[]>>();
 const findWebauthnUserId = vi.fn<() => Promise<string | null>>();
+// デモユーザーには登録フォームの代わりに説明を出す（docs/steps/pub-3.md 設計判断7）
+const findDemoExpiresAt = vi.fn<() => Promise<Date | null>>();
 vi.mock("@/lib/credentials", () => ({
   listCredentials: () => listCredentials(),
 }));
 vi.mock("@/lib/users", () => ({
   findWebauthnUserId: () => findWebauthnUserId(),
+  findDemoExpiresAt: () => findDemoExpiresAt(),
 }));
 
 const { default: PasskeysPage } = await import("@/app/settings/passkeys/page");
@@ -67,6 +71,8 @@ beforeEach(() => {
   listCredentials.mockResolvedValue([makeCredential(), makeCredential({ id: "cred_2" })]);
   findWebauthnUserId.mockReset();
   findWebauthnUserId.mockResolvedValue(WEBAUTHN_USER_ID);
+  findDemoExpiresAt.mockReset();
+  findDemoExpiresAt.mockResolvedValue(null); // 既定は通常ユーザー
 });
 
 afterEach(() => {
@@ -110,5 +116,33 @@ describe("1本しかない場合の警告", () => {
   it("2本以上ならバックアップの案内は出ない", async () => {
     render(await PasskeysPage());
     expect(screen.queryByText(/バックアップ用にもう1台登録してください/)).not.toBeInTheDocument();
+  });
+});
+
+describe("デモユーザーへの表示（docs/steps/pub-3.md 設計判断7。判定は DB の demoExpiresAt）", () => {
+  it("デモユーザーには登録フォームの代わりに説明（DEMO_PASSKEY_BLOCKED_MESSAGE）を出す", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+    render(await PasskeysPage());
+    expect(screen.getByText(DEMO_PASSKEY_BLOCKED_MESSAGE)).toBeInTheDocument();
+  });
+
+  it("デモユーザーには表示名の節を出さない", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+    render(await PasskeysPage());
+    expect(screen.queryByText(getPasskeyDisplayName(WEBAUTHN_USER_ID))).not.toBeInTheDocument();
+  });
+
+  it("デモユーザーには別の端末での案内を出さない", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+    render(await PasskeysPage());
+    expect(
+      screen.queryByText(/その端末でログインしてから.*この画面で「この端末を登録」を押してください/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("通常ユーザー（demoExpiresAt が null）にはデモの説明を出さない", async () => {
+    findDemoExpiresAt.mockResolvedValue(null);
+    render(await PasskeysPage());
+    expect(screen.queryByText(DEMO_PASSKEY_BLOCKED_MESSAGE)).not.toBeInTheDocument();
   });
 });
