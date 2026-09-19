@@ -5,6 +5,7 @@ import {
   calculateCategoryReorder,
   type MoveDirection,
 } from "@/lib/category-order";
+import type { UserId } from "@/lib/user-id";
 
 /**
  * カテゴリのデータ層。
@@ -12,6 +13,10 @@ import {
  * PrismaClient は引数で受け取る（src/lib/payment-sources.ts と同じ方針。
  * テストからモックを差し込めるようにするため）。このモジュールはサーバー専用で、
  * Client Component から import しないこと。
+ *
+ * **全操作を userId で絞る（docs/steps/pub-1.md 設計判断 6）。** 取得・更新・削除は
+ * `where: { id, userId }`、一覧・件数・集計・採番も `where` に userId を付ける。
+ * 他人のカテゴリIDには、存在しないIDと同じ notFound を返す。
  *
  * 禁止条件（docs/steps/step-4.md「カテゴリの削除は払い出し先と同じ規則」）:
  * - 削除は Expense も CategoryBudget も参照していないときだけ
@@ -51,23 +56,34 @@ function getPrismaErrorCode(error: unknown): string | null {
  * 一覧を取得する。表示→非表示の順、各グループ内は sortOrder 昇順。
  * 同じ sortOrder があっても順序が揺れないよう id を最後のキーにする。
  */
-export async function listCategories(client: PrismaClient): Promise<Category[]> {
+export async function listCategories(
+  client: PrismaClient,
+  userId: UserId,
+): Promise<Category[]> {
   return client.category.findMany({
+    where: { userId },
     orderBy: [{ isHidden: "asc" }, { sortOrder: "asc" }, { id: "asc" }],
   });
 }
 
 /** 表示中（非表示でない）のカテゴリのみ。支出入力・カテゴリ予算の選択肢に使う */
-export async function listVisibleCategories(client: PrismaClient): Promise<Category[]> {
+export async function listVisibleCategories(
+  client: PrismaClient,
+  userId: UserId,
+): Promise<Category[]> {
   return client.category.findMany({
-    where: { isHidden: false },
+    where: { userId, isHidden: false },
     orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
   });
 }
 
 /** 1件取得。存在しなければ null */
-export async function getCategory(client: PrismaClient, id: string): Promise<Category | null> {
-  return client.category.findUnique({ where: { id } });
+export async function getCategory(
+  client: PrismaClient,
+  userId: UserId,
+  id: string,
+): Promise<Category | null> {
+  return client.category.findFirst({ where: { id, userId } });
 }
 
 export type CategoryDetail = {
@@ -84,14 +100,15 @@ export type CategoryDetail = {
  */
 export async function getCategoryDetail(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<CategoryDetail | null> {
-  const category = await client.category.findUnique({ where: { id } });
+  const category = await client.category.findFirst({ where: { id, userId } });
   if (!category) return null;
 
   const [expenseCount, budgetCount] = await Promise.all([
-    client.expense.count({ where: { categoryId: id } }),
-    client.categoryBudget.count({ where: { categoryId: id } }),
+    client.expense.count({ where: { userId, categoryId: id } }),
+    client.categoryBudget.count({ where: { userId, categoryId: id } }),
   ]);
 
   return { category, expenseCount, budgetCount };
@@ -111,19 +128,25 @@ export type CreateCategoryInput = {
 };
 
 /**
- * 追加する。sortOrder は既存の最大 + 1（一覧の末尾）。
+ * 追加する。sortOrder はその利用者の既存の最大 + 1（一覧の末尾）。
  * isHidden は常に false（追加した直後から使えるようにする）。
+ * userId は引数から設定する（入力オブジェクトの値は使わない）。
  */
 export async function createCategory(
   client: PrismaClient,
+  userId: UserId,
   input: CreateCategoryInput,
 ): Promise<CategoryResult<Category>> {
-  const aggregate = await client.category.aggregate({ _max: { sortOrder: true } });
+  const aggregate = await client.category.aggregate({
+    where: { userId },
+    _max: { sortOrder: true },
+  });
   const nextSortOrder = (aggregate._max.sortOrder ?? 0) + 1;
 
   try {
     const created = await client.category.create({
       data: {
+        userId,
         name: input.name,
         costType: input.costType,
         sortOrder: nextSortOrder,
@@ -151,11 +174,12 @@ export type UpdateCategoryInput = {
  */
 export async function updateCategory(
   client: PrismaClient,
+  userId: UserId,
   input: UpdateCategoryInput,
 ): Promise<CategoryResult<Category>> {
   try {
     const updated = await client.category.update({
-      where: { id: input.id },
+      where: { id: input.id, userId },
       data: { name: input.name, costType: input.costType },
     });
     return { ok: true, value: updated };
@@ -175,14 +199,15 @@ export async function updateCategory(
  */
 export async function setCategoryHidden(
   client: PrismaClient,
+  userId: UserId,
   id: string,
   isHidden: boolean,
 ): Promise<CategoryResult<Category>> {
-  const target = await client.category.findUnique({ where: { id } });
+  const target = await client.category.findFirst({ where: { id, userId } });
   if (!target) return { ok: false, error: CATEGORY_ERRORS.notFound };
   if (target.isHidden === isHidden) return { ok: true, value: target };
 
-  const updated = await client.category.update({ where: { id }, data: { isHidden } });
+  const updated = await client.category.update({ where: { id, userId }, data: { isHidden } });
   return { ok: true, value: updated };
 }
 
@@ -190,21 +215,25 @@ export async function setCategoryHidden(
  * 同一グループ内で1つ上 / 下へ動かす。
  * 並び順の計算は純粋関数（calculateCategoryReorder）に任せ、ここは反映だけを行う。
  *
+ * 並び替えの対象はその利用者のカテゴリだけ。トランザクション内の**各** update も
+ * userId で絞る。
+ *
  * @returns 反映後の全件（表示順）
  */
 export async function moveCategory(
   client: PrismaClient,
+  userId: UserId,
   id: string,
   direction: MoveDirection,
 ): Promise<CategoryResult<Category[]>> {
-  const categories = await listCategories(client);
+  const categories = await listCategories(client, userId);
   const reordered = calculateCategoryReorder(categories, id, direction);
   if (!reordered.ok) return { ok: false, error: reordered.error };
 
   const updated = await client.$transaction(
     reordered.assignments.map((assignment) =>
       client.category.update({
-        where: { id: assignment.id },
+        where: { id: assignment.id, userId },
         data: { sortOrder: assignment.sortOrder },
       }),
     ),
@@ -217,19 +246,20 @@ export async function moveCategory(
  * 削除する。Expense も CategoryBudget も1件も紐づいていないときだけ許す。
  * それ以外は非表示を案内する（過去の家計の履歴と設定した予算を壊さないため）。
  *
- * 削除後に残りの sortOrder を 1 からの連番に振り直す（隙間を作らない）。
+ * 削除後にその利用者の残りの sortOrder を 1 からの連番に振り直す（隙間を作らない）。
  */
 export async function deleteCategory(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<CategoryResult<null>> {
-  const categories = await listCategories(client);
+  const categories = await listCategories(client, userId);
   const target = categories.find((category) => category.id === id);
   if (!target) return { ok: false, error: CATEGORY_ERRORS.notFound };
 
   const [expenseCount, budgetCount] = await Promise.all([
-    client.expense.count({ where: { categoryId: id } }),
-    client.categoryBudget.count({ where: { categoryId: id } }),
+    client.expense.count({ where: { userId, categoryId: id } }),
+    client.categoryBudget.count({ where: { userId, categoryId: id } }),
   ]);
   if (expenseCount > 0) {
     return { ok: false, error: CATEGORY_ERRORS.deleteReferencedByExpense };
@@ -244,10 +274,10 @@ export async function deleteCategory(
 
   try {
     await client.$transaction([
-      client.category.delete({ where: { id } }),
+      client.category.delete({ where: { id, userId } }),
       ...assignments.map((assignment) =>
         client.category.update({
-          where: { id: assignment.id },
+          where: { id: assignment.id, userId },
           data: { sortOrder: assignment.sortOrder },
         }),
       ),

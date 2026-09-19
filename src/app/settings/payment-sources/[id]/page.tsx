@@ -11,6 +11,7 @@ import {
   getSetDefaultBlockedReason,
 } from "@/lib/payment-sources";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 
 import { PAYMENT_SOURCES_PATH } from "../action-state";
 import {
@@ -36,8 +37,10 @@ export default async function PaymentSourceEditPage({
   params: Promise<{ id: string }>;
 }) {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
   const { id } = await params;
-  const detail = await getPaymentSourceDetail(prisma, id);
+  const detail = await getPaymentSourceDetail(prisma, userId, id);
   if (!detail) notFound();
 
   const { paymentSource } = detail;

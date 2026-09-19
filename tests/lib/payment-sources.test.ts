@@ -7,6 +7,11 @@
 // 期待値の根拠:
 // - docs/steps/step-3.md「設計判断」（既定は常に1件・削除は参照ゼロのときだけ 等）
 // - docs/steps/step-3.md「実装完了後の引き継ぎ」の「特に確認したい観点」1・4・5・8
+// - docs/steps/pub-1.md 設計判断 5・6（ユニーク制約・採番・既定をユーザー単位に、
+//   全データ操作関数のシグネチャを (client, userId, ...) にする）。
+//   「setDefaultPaymentSource の updateMany({ where: { isDefault: true } }) に userId を
+//   付け忘れると、全ユーザーの既定が外れる」という名指しの注意があるため、
+//   updateMany の where は特に厳密に検証する
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -31,12 +36,16 @@ import {
   updatePaymentSource,
   type PaymentSourceDetail,
 } from "@/lib/payment-sources";
+import type { UserId } from "@/lib/user-id";
 
 const NOW = new Date("2026-08-13T00:00:00.000Z");
+const USER_ID = "user_1" as UserId;
+const OTHER_USER_ID = "user_2" as UserId;
 
 function makePaymentSource(overrides: Partial<PaymentSource> = {}): PaymentSource {
   return {
     id: "ps_1",
+    userId: USER_ID,
     name: "現金",
     type: PaymentSourceType.CASH,
     sortOrder: 1,
@@ -45,7 +54,7 @@ function makePaymentSource(overrides: Partial<PaymentSource> = {}): PaymentSourc
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
-  };
+  } as PaymentSource;
 }
 
 function makeDetail(overrides: Partial<PaymentSourceDetail> = {}): PaymentSourceDetail {
@@ -66,7 +75,7 @@ function prismaError(code: string): Error {
 /** テストで使う範囲だけを備えた PrismaClient のモック */
 function createMockClient() {
   const findMany = vi.fn();
-  const findUnique = vi.fn();
+  const findFirst = vi.fn();
   const aggregate = vi.fn();
   const create = vi.fn();
   const update = vi.fn();
@@ -80,7 +89,7 @@ function createMockClient() {
   const client = {
     paymentSource: {
       findMany,
-      findUnique,
+      findFirst,
       aggregate,
       create,
       update,
@@ -96,7 +105,7 @@ function createMockClient() {
   return {
     client,
     findMany,
-    findUnique,
+    findFirst,
     aggregate,
     create,
     update,
@@ -110,13 +119,14 @@ function createMockClient() {
 }
 
 describe("listPaymentSources", () => {
-  it("有効→無効、各グループ内は sortOrder 昇順で findMany に orderBy を渡す", async () => {
+  it("有効→無効、各グループ内は sortOrder 昇順で findMany に orderBy を渡し、userId で絞る", async () => {
     const { client, findMany } = createMockClient();
     findMany.mockResolvedValue([]);
 
-    await listPaymentSources(client);
+    await listPaymentSources(client, USER_ID);
 
     expect(findMany).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
       orderBy: [{ isActive: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
     });
   });
@@ -126,63 +136,75 @@ describe("listPaymentSources", () => {
     const sources = [makePaymentSource({ id: "a" }), makePaymentSource({ id: "b" })];
     findMany.mockResolvedValue(sources);
 
-    await expect(listPaymentSources(client)).resolves.toBe(sources);
+    await expect(listPaymentSources(client, USER_ID)).resolves.toBe(sources);
   });
 
   it("1件も無い場合は空配列を返す", async () => {
     const { client, findMany } = createMockClient();
     findMany.mockResolvedValue([]);
 
-    await expect(listPaymentSources(client)).resolves.toEqual([]);
+    await expect(listPaymentSources(client, USER_ID)).resolves.toEqual([]);
   });
 });
 
 describe("getPaymentSource", () => {
-  it("存在すればそのレコードを返す", async () => {
-    const { client, findUnique } = createMockClient();
+  it("存在すればそのレコードを返す。where は { id, userId }", async () => {
+    const { client, findFirst } = createMockClient();
     const source = makePaymentSource();
-    findUnique.mockResolvedValue(source);
+    findFirst.mockResolvedValue(source);
 
-    await expect(getPaymentSource(client, "ps_1")).resolves.toBe(source);
-    expect(findUnique).toHaveBeenCalledWith({ where: { id: "ps_1" } });
+    await expect(getPaymentSource(client, USER_ID, "ps_1")).resolves.toBe(source);
+    expect(findFirst).toHaveBeenCalledWith({ where: { id: "ps_1", userId: USER_ID } });
   });
 
   it("存在しなければ null を返す", async () => {
-    const { client, findUnique } = createMockClient();
-    findUnique.mockResolvedValue(null);
+    const { client, findFirst } = createMockClient();
+    findFirst.mockResolvedValue(null);
 
-    await expect(getPaymentSource(client, "no-such-id")).resolves.toBeNull();
+    await expect(getPaymentSource(client, USER_ID, "no-such-id")).resolves.toBeNull();
+  });
+
+  it("他人の userId を渡すと where に他人の userId が渡る（findFirst が絞り込みを担う）", async () => {
+    const { client, findFirst } = createMockClient();
+    findFirst.mockResolvedValue(null);
+
+    await getPaymentSource(client, OTHER_USER_ID, "ps_1");
+    expect(findFirst).toHaveBeenCalledWith({ where: { id: "ps_1", userId: OTHER_USER_ID } });
   });
 });
 
 describe("getPaymentSourceDetail", () => {
   it("存在しない場合は null（カウント系は呼ばない）", async () => {
-    const { client, findUnique, expenseCount, budgetCount, count } = createMockClient();
-    findUnique.mockResolvedValue(null);
+    const { client, findFirst, expenseCount, budgetCount, count } = createMockClient();
+    findFirst.mockResolvedValue(null);
 
-    await expect(getPaymentSourceDetail(client, "no-such-id")).resolves.toBeNull();
+    await expect(getPaymentSourceDetail(client, USER_ID, "no-such-id")).resolves.toBeNull();
     expect(expenseCount).not.toHaveBeenCalled();
     expect(budgetCount).not.toHaveBeenCalled();
     expect(count).not.toHaveBeenCalled();
   });
 
-  it("存在する場合は支出数・予算数・有効件数をまとめて返す", async () => {
-    const { client, findUnique, expenseCount, budgetCount, count } = createMockClient();
+  it("存在する場合は支出数・予算数・有効件数をまとめて返し、各カウントを userId で絞る", async () => {
+    const { client, findFirst, expenseCount, budgetCount, count } = createMockClient();
     const source = makePaymentSource({ id: "ps_1" });
-    findUnique.mockResolvedValue(source);
+    findFirst.mockResolvedValue(source);
     expenseCount.mockResolvedValue(3);
     budgetCount.mockResolvedValue(1);
     count.mockResolvedValue(2);
 
-    await expect(getPaymentSourceDetail(client, "ps_1")).resolves.toEqual({
+    await expect(getPaymentSourceDetail(client, USER_ID, "ps_1")).resolves.toEqual({
       paymentSource: source,
       expenseCount: 3,
       budgetCount: 1,
       activeCount: 2,
     });
-    expect(expenseCount).toHaveBeenCalledWith({ where: { paymentSourceId: "ps_1" } });
-    expect(budgetCount).toHaveBeenCalledWith({ where: { paymentSourceId: "ps_1" } });
-    expect(count).toHaveBeenCalledWith({ where: { isActive: true } });
+    expect(expenseCount).toHaveBeenCalledWith({
+      where: { userId: USER_ID, paymentSourceId: "ps_1" },
+    });
+    expect(budgetCount).toHaveBeenCalledWith({
+      where: { userId: USER_ID, paymentSourceId: "ps_1" },
+    });
+    expect(count).toHaveBeenCalledWith({ where: { userId: USER_ID, isActive: true } });
   });
 });
 
@@ -267,15 +289,28 @@ describe("getSetDefaultBlockedReason", () => {
 });
 
 describe("createPaymentSource", () => {
-  it("既存の最大 sortOrder + 1 を割り当てる", async () => {
+  it("既存の最大 sortOrder + 1 を割り当てる。aggregate は userId で絞る", async () => {
     const { client, aggregate, create } = createMockClient();
     aggregate.mockResolvedValue({ _max: { sortOrder: 4 } });
     create.mockResolvedValue(makePaymentSource({ sortOrder: 5 }));
 
-    await createPaymentSource(client, { name: "Aカード", type: PaymentSourceType.CREDIT_CARD });
+    await createPaymentSource(client, USER_ID, {
+      name: "Aカード",
+      type: PaymentSourceType.CREDIT_CARD,
+    });
 
+    expect(aggregate).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
+      _max: { sortOrder: true },
+    });
     expect(create).toHaveBeenCalledWith({
-      data: { name: "Aカード", type: PaymentSourceType.CREDIT_CARD, sortOrder: 5, isDefault: false },
+      data: {
+        userId: USER_ID,
+        name: "Aカード",
+        type: PaymentSourceType.CREDIT_CARD,
+        sortOrder: 5,
+        isDefault: false,
+      },
     });
   });
 
@@ -284,10 +319,16 @@ describe("createPaymentSource", () => {
     aggregate.mockResolvedValue({ _max: { sortOrder: null } });
     create.mockResolvedValue(makePaymentSource({ sortOrder: 1 }));
 
-    await createPaymentSource(client, { name: "現金", type: PaymentSourceType.CASH });
+    await createPaymentSource(client, USER_ID, { name: "現金", type: PaymentSourceType.CASH });
 
     expect(create).toHaveBeenCalledWith({
-      data: { name: "現金", type: PaymentSourceType.CASH, sortOrder: 1, isDefault: false },
+      data: {
+        userId: USER_ID,
+        name: "現金",
+        type: PaymentSourceType.CASH,
+        sortOrder: 1,
+        isDefault: false,
+      },
     });
   });
 
@@ -296,11 +337,21 @@ describe("createPaymentSource", () => {
     aggregate.mockResolvedValue({ _max: { sortOrder: null } });
     create.mockResolvedValue(makePaymentSource());
 
-    await createPaymentSource(client, { name: "現金", type: PaymentSourceType.CASH });
+    await createPaymentSource(client, USER_ID, { name: "現金", type: PaymentSourceType.CASH });
 
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ isDefault: false }) }),
     );
+  });
+
+  it("data.userId は引数の userId から設定する", async () => {
+    const { client, aggregate, create } = createMockClient();
+    aggregate.mockResolvedValue({ _max: { sortOrder: null } });
+    create.mockResolvedValue(makePaymentSource());
+
+    await createPaymentSource(client, USER_ID, { name: "現金", type: PaymentSourceType.CASH });
+
+    expect(create.mock.calls[0][0].data.userId).toBe(USER_ID);
   });
 
   it("成功時は ok: true とレコードを返す", async () => {
@@ -310,7 +361,7 @@ describe("createPaymentSource", () => {
     create.mockResolvedValue(created);
 
     await expect(
-      createPaymentSource(client, { name: "現金", type: PaymentSourceType.CASH }),
+      createPaymentSource(client, USER_ID, { name: "現金", type: PaymentSourceType.CASH }),
     ).resolves.toEqual({ ok: true, value: created });
   });
 
@@ -320,7 +371,7 @@ describe("createPaymentSource", () => {
     create.mockRejectedValue(prismaError("P2002"));
 
     await expect(
-      createPaymentSource(client, { name: "現金", type: PaymentSourceType.CASH }),
+      createPaymentSource(client, USER_ID, { name: "現金", type: PaymentSourceType.CASH }),
     ).resolves.toEqual({ ok: false, error: PAYMENT_SOURCE_ERRORS.duplicateName });
   });
 
@@ -330,24 +381,24 @@ describe("createPaymentSource", () => {
     create.mockRejectedValue(prismaError("P9999"));
 
     await expect(
-      createPaymentSource(client, { name: "現金", type: PaymentSourceType.CASH }),
+      createPaymentSource(client, USER_ID, { name: "現金", type: PaymentSourceType.CASH }),
     ).rejects.toThrow();
   });
 });
 
 describe("updatePaymentSource", () => {
-  it("name と type だけを更新する", async () => {
+  it("name と type だけを更新する。where は { id, userId }", async () => {
     const { client, update } = createMockClient();
     update.mockResolvedValue(makePaymentSource({ name: "A銀行" }));
 
-    await updatePaymentSource(client, {
+    await updatePaymentSource(client, USER_ID, {
       id: "ps_1",
       name: "A銀行",
       type: PaymentSourceType.BANK_DEBIT,
     });
 
     expect(update).toHaveBeenCalledWith({
-      where: { id: "ps_1" },
+      where: { id: "ps_1", userId: USER_ID },
       data: { name: "A銀行", type: PaymentSourceType.BANK_DEBIT },
     });
   });
@@ -358,7 +409,11 @@ describe("updatePaymentSource", () => {
     update.mockResolvedValue(updated);
 
     await expect(
-      updatePaymentSource(client, { id: "ps_1", name: "A銀行", type: PaymentSourceType.BANK_DEBIT }),
+      updatePaymentSource(client, USER_ID, {
+        id: "ps_1",
+        name: "A銀行",
+        type: PaymentSourceType.BANK_DEBIT,
+      }),
     ).resolves.toEqual({ ok: true, value: updated });
   });
 
@@ -367,7 +422,7 @@ describe("updatePaymentSource", () => {
     update.mockRejectedValue(prismaError("P2002"));
 
     await expect(
-      updatePaymentSource(client, { id: "ps_1", name: "現金", type: PaymentSourceType.CASH }),
+      updatePaymentSource(client, USER_ID, { id: "ps_1", name: "現金", type: PaymentSourceType.CASH }),
     ).resolves.toEqual({ ok: false, error: PAYMENT_SOURCE_ERRORS.duplicateName });
   });
 
@@ -376,28 +431,33 @@ describe("updatePaymentSource", () => {
     update.mockRejectedValue(prismaError("P2025"));
 
     await expect(
-      updatePaymentSource(client, { id: "no-such-id", name: "現金", type: PaymentSourceType.CASH }),
+      updatePaymentSource(client, USER_ID, {
+        id: "no-such-id",
+        name: "現金",
+        type: PaymentSourceType.CASH,
+      }),
     ).resolves.toEqual({ ok: false, error: PAYMENT_SOURCE_ERRORS.notFound });
   });
 });
 
 describe("setDefaultPaymentSource", () => {
-  it("対象が存在しなければ notFound", async () => {
-    const { client, findUnique, transaction } = createMockClient();
-    findUnique.mockResolvedValue(null);
+  it("対象が存在しなければ notFound。findFirst の where は { id, userId }", async () => {
+    const { client, findFirst, transaction } = createMockClient();
+    findFirst.mockResolvedValue(null);
 
-    await expect(setDefaultPaymentSource(client, "no-such-id")).resolves.toEqual({
+    await expect(setDefaultPaymentSource(client, USER_ID, "no-such-id")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.notFound,
     });
+    expect(findFirst).toHaveBeenCalledWith({ where: { id: "no-such-id", userId: USER_ID } });
     expect(transaction).not.toHaveBeenCalled();
   });
 
   it("無効な払い出し先は既定にできない", async () => {
-    const { client, findUnique, transaction } = createMockClient();
-    findUnique.mockResolvedValue(makePaymentSource({ isActive: false, isDefault: false }));
+    const { client, findFirst, transaction } = createMockClient();
+    findFirst.mockResolvedValue(makePaymentSource({ isActive: false, isDefault: false }));
 
-    await expect(setDefaultPaymentSource(client, "ps_1")).resolves.toEqual({
+    await expect(setDefaultPaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.defaultMustBeActive,
     });
@@ -406,32 +466,37 @@ describe("setDefaultPaymentSource", () => {
 
   it("すでに既定なら何もせず ok を返す（トランザクションを起こさない）", async () => {
     const target = makePaymentSource({ isActive: true, isDefault: true });
-    const { client, findUnique, transaction } = createMockClient();
-    findUnique.mockResolvedValue(target);
+    const { client, findFirst, transaction } = createMockClient();
+    findFirst.mockResolvedValue(target);
 
-    await expect(setDefaultPaymentSource(client, "ps_1")).resolves.toEqual({
+    await expect(setDefaultPaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
       ok: true,
       value: target,
     });
     expect(transaction).not.toHaveBeenCalled();
   });
 
-  it("旧既定を false にしてから新既定を true にする（この順序が逆だと P2002 になる）", async () => {
-    const { client, findUnique, updateMany, update, transaction } = createMockClient();
-    findUnique.mockResolvedValue(makePaymentSource({ id: "ps_2", isActive: true, isDefault: false }));
+  it("旧既定を false にしてから新既定を true にする。updateMany の where に userId がある（この where が無いと全ユーザーの既定が外れる）", async () => {
+    const { client, findFirst, updateMany, update, transaction } = createMockClient();
+    findFirst.mockResolvedValue(
+      makePaymentSource({ id: "ps_2", isActive: true, isDefault: false }),
+    );
     updateMany.mockResolvedValue({ count: 1 });
     const updated = makePaymentSource({ id: "ps_2", isDefault: true });
     update.mockResolvedValue(updated);
 
-    const result = await setDefaultPaymentSource(client, "ps_2");
+    const result = await setDefaultPaymentSource(client, USER_ID, "ps_2");
 
     expect(result).toEqual({ ok: true, value: updated });
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(updateMany).toHaveBeenCalledWith({
-      where: { isDefault: true },
+      where: { userId: USER_ID, isDefault: true },
       data: { isDefault: false },
     });
-    expect(update).toHaveBeenCalledWith({ where: { id: "ps_2" }, data: { isDefault: true } });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "ps_2", userId: USER_ID },
+      data: { isDefault: true },
+    });
     // $transaction に渡る配列の順序そのもの: updateMany が先、update が後
     expect(updateMany.mock.invocationCallOrder[0]).toBeLessThan(update.mock.invocationCallOrder[0]);
   });
@@ -439,10 +504,10 @@ describe("setDefaultPaymentSource", () => {
 
 describe("setPaymentSourceActive", () => {
   it("対象が存在しなければ notFound", async () => {
-    const { client, findUnique, update } = createMockClient();
-    findUnique.mockResolvedValue(null);
+    const { client, findFirst, update } = createMockClient();
+    findFirst.mockResolvedValue(null);
 
-    await expect(setPaymentSourceActive(client, "no-such-id", false)).resolves.toEqual({
+    await expect(setPaymentSourceActive(client, USER_ID, "no-such-id", false)).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.notFound,
     });
@@ -451,10 +516,10 @@ describe("setPaymentSourceActive", () => {
 
   it("すでに同じ状態なら何もせず ok（update を呼ばない）", async () => {
     const target = makePaymentSource({ isActive: true });
-    const { client, findUnique, update, count } = createMockClient();
-    findUnique.mockResolvedValue(target);
+    const { client, findFirst, update, count } = createMockClient();
+    findFirst.mockResolvedValue(target);
 
-    await expect(setPaymentSourceActive(client, "ps_1", true)).resolves.toEqual({
+    await expect(setPaymentSourceActive(client, USER_ID, "ps_1", true)).resolves.toEqual({
       ok: true,
       value: target,
     });
@@ -463,59 +528,66 @@ describe("setPaymentSourceActive", () => {
   });
 
   it("既定の払い出し先は無効化できない", async () => {
-    const { client, findUnique, update } = createMockClient();
-    findUnique.mockResolvedValue(makePaymentSource({ isActive: true, isDefault: true }));
+    const { client, findFirst, update } = createMockClient();
+    findFirst.mockResolvedValue(makePaymentSource({ isActive: true, isDefault: true }));
 
-    await expect(setPaymentSourceActive(client, "ps_1", false)).resolves.toEqual({
+    await expect(setPaymentSourceActive(client, USER_ID, "ps_1", false)).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.deactivateDefault,
     });
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("有効な払い出し先が1件（自分）だけのときは無効化できない", async () => {
-    const { client, findUnique, count, update } = createMockClient();
-    findUnique.mockResolvedValue(makePaymentSource({ isActive: true, isDefault: false }));
+  it("有効な払い出し先が1件（自分）だけのときは無効化できない。count は userId で絞る", async () => {
+    const { client, findFirst, count, update } = createMockClient();
+    findFirst.mockResolvedValue(makePaymentSource({ isActive: true, isDefault: false }));
     count.mockResolvedValue(1);
 
-    await expect(setPaymentSourceActive(client, "ps_1", false)).resolves.toEqual({
+    await expect(setPaymentSourceActive(client, USER_ID, "ps_1", false)).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.deactivateLastActive,
     });
+    expect(count).toHaveBeenCalledWith({ where: { userId: USER_ID, isActive: true } });
     expect(update).not.toHaveBeenCalled();
   });
 
   it("有効な払い出し先が2件あれば無効化できる（境界値: 1件はNG・2件はOK）", async () => {
-    const { client, findUnique, count, update } = createMockClient();
-    findUnique.mockResolvedValue(makePaymentSource({ isActive: true, isDefault: false }));
+    const { client, findFirst, count, update } = createMockClient();
+    findFirst.mockResolvedValue(makePaymentSource({ isActive: true, isDefault: false }));
     count.mockResolvedValue(2);
     const updated = makePaymentSource({ isActive: false });
     update.mockResolvedValue(updated);
 
-    await expect(setPaymentSourceActive(client, "ps_1", false)).resolves.toEqual({
+    await expect(setPaymentSourceActive(client, USER_ID, "ps_1", false)).resolves.toEqual({
       ok: true,
       value: updated,
     });
-    expect(update).toHaveBeenCalledWith({ where: { id: "ps_1" }, data: { isActive: false } });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "ps_1", userId: USER_ID },
+      data: { isActive: false },
+    });
   });
 
   it("有効化のときは有効件数を検査しない（count を呼ばない）", async () => {
-    const { client, findUnique, count, update } = createMockClient();
-    findUnique.mockResolvedValue(makePaymentSource({ isActive: false, isDefault: false }));
+    const { client, findFirst, count, update } = createMockClient();
+    findFirst.mockResolvedValue(makePaymentSource({ isActive: false, isDefault: false }));
     const updated = makePaymentSource({ isActive: true });
     update.mockResolvedValue(updated);
 
-    await expect(setPaymentSourceActive(client, "ps_1", true)).resolves.toEqual({
+    await expect(setPaymentSourceActive(client, USER_ID, "ps_1", true)).resolves.toEqual({
       ok: true,
       value: updated,
     });
     expect(count).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledWith({ where: { id: "ps_1" }, data: { isActive: true } });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "ps_1", userId: USER_ID },
+      data: { isActive: true },
+    });
   });
 });
 
 describe("movePaymentSource", () => {
-  it("計算結果をトランザクションで反映し、反映後の全件を返す", async () => {
+  it("計算結果をトランザクションで反映し、反映後の全件を返す。各 update の where に userId がある", async () => {
     const sources = [
       makePaymentSource({ id: "a1", sortOrder: 1, isActive: true }),
       makePaymentSource({ id: "a2", sortOrder: 2, isActive: true }),
@@ -523,11 +595,11 @@ describe("movePaymentSource", () => {
     const { client, findMany, update, transaction } = createMockClient();
     findMany.mockResolvedValue(sources);
     update.mockImplementation(
-      async (args: { where: { id: string }; data: { sortOrder: number } }) =>
+      async (args: { where: { id: string; userId: UserId }; data: { sortOrder: number } }) =>
         makePaymentSource({ id: args.where.id, sortOrder: args.data.sortOrder }),
     );
 
-    const result = await movePaymentSource(client, "a1", "down");
+    const result = await movePaymentSource(client, USER_ID, "a1", "down");
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -537,6 +609,9 @@ describe("movePaymentSource", () => {
       ]);
     }
     expect(transaction).toHaveBeenCalledTimes(1);
+    for (const call of update.mock.calls) {
+      expect(call[0].where.userId).toBe(USER_ID);
+    }
   });
 
   it("移動できない場合はエラーを返し、トランザクションを起こさない", async () => {
@@ -544,7 +619,7 @@ describe("movePaymentSource", () => {
     const { client, findMany, transaction } = createMockClient();
     findMany.mockResolvedValue(sources);
 
-    const result = await movePaymentSource(client, "a1", "up");
+    const result = await movePaymentSource(client, USER_ID, "a1", "up");
 
     expect(result.ok).toBe(false);
     expect(transaction).not.toHaveBeenCalled();
@@ -556,7 +631,7 @@ describe("deletePaymentSource — 判定順序: 既定 → 支出あり → 予�
     const { client, findMany, expenseCount, budgetCount } = createMockClient();
     findMany.mockResolvedValue([]);
 
-    await expect(deletePaymentSource(client, "no-such-id")).resolves.toEqual({
+    await expect(deletePaymentSource(client, USER_ID, "no-such-id")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.notFound,
     });
@@ -569,7 +644,7 @@ describe("deletePaymentSource — 判定順序: 既定 → 支出あり → 予�
     const { client, findMany, expenseCount, budgetCount } = createMockClient();
     findMany.mockResolvedValue([target]);
 
-    await expect(deletePaymentSource(client, "ps_1")).resolves.toEqual({
+    await expect(deletePaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.deleteDefault,
     });
@@ -577,16 +652,19 @@ describe("deletePaymentSource — 判定順序: 既定 → 支出あり → 予�
     expect(budgetCount).not.toHaveBeenCalled();
   });
 
-  it("支出が1件でもあれば削除できない（予算より先に判定される）", async () => {
+  it("支出が1件でもあれば削除できない（予算より先に判定される）。カウントは userId で絞る", async () => {
     const target = makePaymentSource({ id: "ps_1", isDefault: false });
     const { client, findMany, expenseCount, budgetCount } = createMockClient();
     findMany.mockResolvedValue([target]);
     expenseCount.mockResolvedValue(1);
     budgetCount.mockResolvedValue(1);
 
-    await expect(deletePaymentSource(client, "ps_1")).resolves.toEqual({
+    await expect(deletePaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.deleteReferencedByExpense,
+    });
+    expect(expenseCount).toHaveBeenCalledWith({
+      where: { userId: USER_ID, paymentSourceId: "ps_1" },
     });
   });
 
@@ -597,13 +675,13 @@ describe("deletePaymentSource — 判定順序: 既定 → 支出あり → 予�
     expenseCount.mockResolvedValue(0);
     budgetCount.mockResolvedValue(1);
 
-    await expect(deletePaymentSource(client, "ps_1")).resolves.toEqual({
+    await expect(deletePaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.deleteReferencedByBudget,
     });
   });
 
-  it("支出も予算も無ければ削除でき、残りの sortOrder を連番に振り直す", async () => {
+  it("支出も予算も無ければ削除でき、残りの sortOrder を連番に振り直す。where は { id, userId }", async () => {
     const target = makePaymentSource({ id: "ps_1", sortOrder: 1, isDefault: false });
     const other = makePaymentSource({ id: "ps_2", sortOrder: 2 });
     const { client, findMany, expenseCount, budgetCount, deleteFn, update, transaction } =
@@ -614,10 +692,16 @@ describe("deletePaymentSource — 判定順序: 既定 → 支出あり → 予�
     deleteFn.mockResolvedValue(target);
     update.mockResolvedValue(makePaymentSource({ id: "ps_2", sortOrder: 1 }));
 
-    await expect(deletePaymentSource(client, "ps_1")).resolves.toEqual({ ok: true, value: null });
+    await expect(deletePaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
+      ok: true,
+      value: null,
+    });
 
-    expect(deleteFn).toHaveBeenCalledWith({ where: { id: "ps_1" } });
-    expect(update).toHaveBeenCalledWith({ where: { id: "ps_2" }, data: { sortOrder: 1 } });
+    expect(deleteFn).toHaveBeenCalledWith({ where: { id: "ps_1", userId: USER_ID } });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "ps_2", userId: USER_ID },
+      data: { sortOrder: 1 },
+    });
     expect(transaction).toHaveBeenCalledTimes(1);
   });
 
@@ -629,7 +713,7 @@ describe("deletePaymentSource — 判定順序: 既定 → 支出あり → 予�
     budgetCount.mockResolvedValue(0);
     transaction.mockRejectedValue(prismaError("P2039"));
 
-    await expect(deletePaymentSource(client, "ps_1")).resolves.toEqual({
+    await expect(deletePaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.deleteReferencedByExpense,
     });
@@ -643,7 +727,7 @@ describe("deletePaymentSource — 判定順序: 既定 → 支出あり → 予�
     budgetCount.mockResolvedValue(0);
     transaction.mockRejectedValue(prismaError("P2025"));
 
-    await expect(deletePaymentSource(client, "ps_1")).resolves.toEqual({
+    await expect(deletePaymentSource(client, USER_ID, "ps_1")).resolves.toEqual({
       ok: false,
       error: PAYMENT_SOURCE_ERRORS.notFound,
     });

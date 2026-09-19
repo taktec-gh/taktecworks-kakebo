@@ -1,9 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 
-import { LOGIN_PATH } from "@/lib/auth";
 import { parseBudgetAmountInput } from "@/lib/budget-calculation";
 import {
   deleteBudget,
@@ -16,7 +14,7 @@ import { listCategories } from "@/lib/categories";
 import { validatePaymentSourceId } from "@/lib/payment-source-validation";
 import { listPaymentSources } from "@/lib/payment-sources";
 import { prisma } from "@/lib/prisma";
-import { getSession } from "@/lib/session";
+import { requireUserId } from "@/lib/session";
 import { validateYearMonth } from "@/lib/year-month";
 
 import {
@@ -34,13 +32,9 @@ import {
  * 保存はデータ層の1トランザクションで反映されるので、途中まで保存された状態にはならない。
  *
  * 失敗時は例外を投げず、利用者向けの日本語メッセージを返す。
- * Server Action は POST エンドポイントとして直接叩けるため、各アクションでセッションを確認する。
+ * Server Action は POST エンドポイントとして直接叩けるため、各アクションの先頭で requireUserId() を呼び、
+ * データ層へは必ずその戻り値（ログイン中の利用者ID）を渡す（docs/steps/pub-1.md）。
  */
-
-async function requireSession(): Promise<void> {
-  const session = await getSession();
-  if (!session) redirect(LOGIN_PATH);
-}
 
 /** どの行の入力が悪いのか分かるように、名前を添えて返す */
 function fieldError(name: string, error: string): string {
@@ -50,6 +44,9 @@ function fieldError(name: string, error: string): string {
 /**
  * 払い出し先の予算をまとめて保存する。
  *
+ * 入力欄名は**その利用者の**払い出し先の一覧から組み立てる。他人の払い出し先IDの
+ * 入力欄を送られても読まない。
+ *
  * - 送られてこなかった払い出し先の予算は変更しない
  * - 空欄は「未設定」としてレコードを削除する（0 は 0 円の予算として保存する）
  */
@@ -57,12 +54,12 @@ export async function saveBudgetsAction(
   _prevState: BudgetActionState,
   formData: FormData,
 ): Promise<BudgetActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const yearMonth = validateYearMonth(formData.get("yearMonth"));
   if (!yearMonth.ok) return { error: yearMonth.error, saved: false };
 
-  const paymentSources = await listPaymentSources(prisma);
+  const paymentSources = await listPaymentSources(prisma, userId);
   const inputs: BudgetAmountInput[] = [];
 
   for (const source of paymentSources) {
@@ -75,7 +72,7 @@ export async function saveBudgetsAction(
     inputs.push({ paymentSourceId: source.id, amountYen: parsed.value });
   }
 
-  const result = await saveBudgets(prisma, yearMonth.value, inputs);
+  const result = await saveBudgets(prisma, userId, yearMonth.value, inputs);
   if (!result.ok) return { error: result.error, saved: false };
 
   revalidatePath(BUDGETS_PATH);
@@ -85,17 +82,18 @@ export async function saveBudgetsAction(
 /**
  * カテゴリ予算をまとめて保存する。
  * 任意の補助上限であり、総予算には足さない。
+ * 入力欄名は**その利用者の**カテゴリの一覧から組み立てる（他人のカテゴリIDの入力欄は読まない）。
  */
 export async function saveCategoryBudgetsAction(
   _prevState: BudgetActionState,
   formData: FormData,
 ): Promise<BudgetActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const yearMonth = validateYearMonth(formData.get("yearMonth"));
   if (!yearMonth.ok) return { error: yearMonth.error, saved: false };
 
-  const categories = await listCategories(prisma);
+  const categories = await listCategories(prisma, userId);
   const inputs: CategoryBudgetAmountInput[] = [];
 
   for (const category of categories) {
@@ -108,7 +106,7 @@ export async function saveCategoryBudgetsAction(
     inputs.push({ categoryId: category.id, amountYen: parsed.value });
   }
 
-  const result = await saveCategoryBudgets(prisma, yearMonth.value, inputs);
+  const result = await saveCategoryBudgets(prisma, userId, yearMonth.value, inputs);
   if (!result.ok) return { error: result.error, saved: false };
 
   revalidatePath(BUDGETS_PATH);
@@ -123,7 +121,7 @@ export async function deleteBudgetAction(
   _prevState: BudgetActionState,
   formData: FormData,
 ): Promise<BudgetActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const yearMonth = validateYearMonth(formData.get("yearMonth"));
   if (!yearMonth.ok) return { error: yearMonth.error, saved: false };
@@ -131,7 +129,7 @@ export async function deleteBudgetAction(
   const paymentSourceId = validatePaymentSourceId(formData.get("paymentSourceId"));
   if (!paymentSourceId.ok) return { error: paymentSourceId.error, saved: false };
 
-  const result = await deleteBudget(prisma, paymentSourceId.value, yearMonth.value);
+  const result = await deleteBudget(prisma, userId, paymentSourceId.value, yearMonth.value);
   if (!result.ok) return { error: result.error, saved: false };
 
   revalidatePath(BUDGETS_PATH);

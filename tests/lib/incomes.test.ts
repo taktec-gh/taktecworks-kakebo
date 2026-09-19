@@ -19,6 +19,9 @@ import {
   listIncomes,
   sumIncomeAmounts,
 } from "@/lib/incomes";
+import type { UserId } from "@/lib/user-id";
+
+const USER_ID = "user_1" as UserId;
 
 function prismaError(code: string): Error {
   return Object.assign(new Error(`mock prisma error ${code}`), { code });
@@ -41,14 +44,14 @@ function createMockClient() {
 }
 
 describe("listIncomes", () => {
-  it("yearMonth で絞り込み、createdAt 降順・id 昇順で取得する", async () => {
+  it("userId・yearMonth で絞り込み、createdAt 降順・id 昇順で取得する", async () => {
     const { client, incomeFindMany } = createMockClient();
     incomeFindMany.mockResolvedValue([]);
 
-    await listIncomes(client, "2026-08");
+    await listIncomes(client, USER_ID, "2026-08");
 
     expect(incomeFindMany).toHaveBeenCalledWith({
-      where: { yearMonth: "2026-08" },
+      where: { userId: USER_ID, yearMonth: "2026-08" },
       orderBy: [{ createdAt: "desc" }, { id: "asc" }],
     });
   });
@@ -58,7 +61,7 @@ describe("createIncome", () => {
   it("不正な yearMonth のときは DB を呼ばずに invalidYearMonth を返す", async () => {
     const { client, incomeCreate } = createMockClient();
 
-    const result = await createIncome(client, {
+    const result = await createIncome(client, USER_ID, {
       yearMonth: "invalid",
       amountYen: 1_000,
       label: null,
@@ -71,7 +74,7 @@ describe("createIncome", () => {
   it("金額が0円のときは DB を呼ばずに invalidAmount を返す（下限1円）", async () => {
     const { client, incomeCreate } = createMockClient();
 
-    const result = await createIncome(client, {
+    const result = await createIncome(client, USER_ID, {
       yearMonth: "2026-08",
       amountYen: 0,
       label: null,
@@ -84,7 +87,7 @@ describe("createIncome", () => {
   it("金額が負数のときは invalidAmount", async () => {
     const { client } = createMockClient();
 
-    const result = await createIncome(client, {
+    const result = await createIncome(client, USER_ID, {
       yearMonth: "2026-08",
       amountYen: -100,
       label: null,
@@ -96,7 +99,7 @@ describe("createIncome", () => {
   it("金額が上限（99,999,999円）を超えるときは invalidAmount", async () => {
     const { client } = createMockClient();
 
-    const result = await createIncome(client, {
+    const result = await createIncome(client, USER_ID, {
       yearMonth: "2026-08",
       amountYen: 100_000_000,
       label: null,
@@ -108,7 +111,7 @@ describe("createIncome", () => {
   it("金額が非整数のときは invalidAmount", async () => {
     const { client } = createMockClient();
 
-    const result = await createIncome(client, {
+    const result = await createIncome(client, USER_ID, {
       yearMonth: "2026-08",
       amountYen: 100.5,
       label: null,
@@ -117,32 +120,32 @@ describe("createIncome", () => {
     expect(result).toEqual({ ok: false, error: INCOME_ERRORS.invalidAmount });
   });
 
-  it("正しい入力なら create を呼び、結果をそのまま返す", async () => {
+  it("正しい入力なら create を呼び、結果をそのまま返す。data.userId は引数の userId から設定する", async () => {
     const { client, incomeCreate } = createMockClient();
     const created = { id: "income_1", yearMonth: "2026-08", amountYen: 300_000, label: "給与" };
     incomeCreate.mockResolvedValue(created);
 
-    const result = await createIncome(client, {
+    const result = await createIncome(client, USER_ID, {
       yearMonth: "2026-08",
       amountYen: 300_000,
       label: "給与",
     });
 
     expect(incomeCreate).toHaveBeenCalledWith({
-      data: { yearMonth: "2026-08", amountYen: 300_000, label: "給与" },
+      data: { userId: USER_ID, yearMonth: "2026-08", amountYen: 300_000, label: "給与" },
     });
     expect(result).toEqual({ ok: true, value: created });
   });
 });
 
 describe("deleteIncome", () => {
-  it("成功したら ok: true を返す", async () => {
+  it("成功したら ok: true を返す。where は { id, userId }", async () => {
     const { client, incomeDelete } = createMockClient();
     incomeDelete.mockResolvedValue({ id: "income_1" });
 
-    const result = await deleteIncome(client, "income_1");
+    const result = await deleteIncome(client, USER_ID, "income_1");
 
-    expect(incomeDelete).toHaveBeenCalledWith({ where: { id: "income_1" } });
+    expect(incomeDelete).toHaveBeenCalledWith({ where: { id: "income_1", userId: USER_ID } });
     expect(result).toEqual({ ok: true, value: null });
   });
 
@@ -150,7 +153,7 @@ describe("deleteIncome", () => {
     const { client, incomeDelete } = createMockClient();
     incomeDelete.mockRejectedValue(prismaError("P2025"));
 
-    const result = await deleteIncome(client, "income_missing");
+    const result = await deleteIncome(client, USER_ID, "income_missing");
 
     expect(result).toEqual({ ok: false, error: INCOME_ERRORS.notFound });
   });
@@ -159,7 +162,7 @@ describe("deleteIncome", () => {
     const { client, incomeDelete } = createMockClient();
     incomeDelete.mockRejectedValue(prismaError("P9999"));
 
-    await expect(deleteIncome(client, "income_1")).rejects.toThrow();
+    await expect(deleteIncome(client, USER_ID, "income_1")).rejects.toThrow();
   });
 });
 

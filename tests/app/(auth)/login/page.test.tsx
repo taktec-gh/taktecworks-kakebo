@@ -20,10 +20,9 @@ afterEach(() => {
 });
 
 describe("ログインページ", () => {
-  it("ログインフォームが組み込まれている（画面まで結線されていることの確認）", () => {
+  it("パスキーでログインボタンが組み込まれている（画面まで結線されていることの確認）", () => {
     render(<LoginPage />);
-    expect(screen.getByLabelText("パスワード")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "ログイン" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /パスキーでログイン/ })).toBeInTheDocument();
   });
 
   it("初期表示ではエラーが出ていない", () => {
@@ -31,17 +30,9 @@ describe("ログインページ", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("パスキーでログインボタンが主動線として組み込まれている（Step 7）", () => {
+  it("パスワード欄が無い（公開版はパスキーのみ。docs/steps/pub-1.md 設計判断 1）", () => {
     render(<LoginPage />);
-    expect(screen.getByRole("button", { name: /パスキーでログイン/ })).toBeInTheDocument();
-  });
-
-  it("パスワードでログインは既定で折りたたまれている（<details> は開いていない）", () => {
-    render(<LoginPage />);
-    const details = screen.getByText("パスワードでログイン").closest("details");
-    expect(details).not.toBeNull();
-    expect(details).not.toHaveAttribute("open");
-    // 折りたたまれていても DOM には存在する（JavaScript 無しでも開けるようにするため）
-    expect(screen.getByLabelText("パスワード")).toBeInTheDocument();
+    expect(screen.queryByLabelText("パスワード")).not.toBeInTheDocument();
+    expect(screen.queryByText("パスワードでログイン")).not.toBeInTheDocument();
   });
 });

@@ -19,18 +19,23 @@ import {
 import { consumeChallengeCookie, setChallengeCookie } from "@/lib/passkey-session";
 import { prisma } from "@/lib/prisma";
 import { createSession } from "@/lib/session";
+import { brandUserIdFromTrustedSource } from "@/lib/user-id";
 
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
 
 /**
  * パスキーでのログイン（Server Action）。フォームではなく Client Component から直接呼ぶ。
  *
+ * 公開版のログイン手段はこれだけ（パスワードログインは廃止。docs/steps/pub-1.md 設計判断 1）。
+ *
  * **失敗の理由は一切返さない。** 期限切れ・未登録・署名不正・レート制限のいずれでも
- * LOGIN_ERROR_MESSAGE を返す（パスワードログインと同じ文言）。
+ * LOGIN_ERROR_MESSAGE を返す。
  * 理由を返すと「そのパスキーが登録されているか」が外から分かってしまう。
  *
- * レート制限はパスワードと同じ仕組みで掛ける。ただし
- * **パスキー必須の判定は掛けない**（これがそのパスキーによる認証だから）。
+ * レート制限は IP 単位（src/lib/login-attempts.ts）。
+ *
+ * **セッションを発行する相手は、検証に通った資格情報の持ち主（Credential.userId）。**
+ * 利用者IDをリクエスト（フォーム・URL・Cookie）から受け取らない。
  */
 
 /** 認証用オプションを作り、チャレンジを短命 Cookie に置く */
@@ -60,7 +65,7 @@ export async function startPasskeyLoginAction(): Promise<PasskeyAuthenticationOp
 }
 
 /**
- * 認証応答を検証し、通ればセッションを発行する。
+ * 認証応答を検証し、通ればその資格情報の持ち主のセッションを発行する。
  *
  * 成功しても画面遷移はここでは行わない（呼び出し元の Client Component が
  * ルータで "/" へ移動する）。
@@ -125,7 +130,8 @@ export async function verifyPasskeyLoginAction(
 
     await updateCredentialCounter(prisma, credential.credentialId, newCounter, new Date());
     await recordLoginAttempt(prisma, ipHash, true);
-    await createSession();
+    // 署名・チャレンジ・カウンタの検証に通った資格情報の持ち主（設計判断 7 の許可リスト）
+    await createSession(brandUserIdFromTrustedSource(credential.userId));
     return { ok: true };
   } catch {
     await recordFailure(ipHash);

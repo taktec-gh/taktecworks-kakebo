@@ -14,12 +14,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createChallengeToken } from "@/lib/passkey";
 import { PASSKEY_ERRORS } from "@/lib/passkey-messages";
+import type { UserId } from "@/lib/user-id";
 
 import type { RegistrationResponseJSON } from "@simplewebauthn/server";
 
 const SECRET = "test-auth-secret-0123456789abcdef";
 const RP_ID = "localhost";
 const RP_ORIGIN = "http://localhost:3123";
+const USER_ID = "user_1" as UserId;
 
 class RedirectError extends Error {
   digest: string;
@@ -33,7 +35,7 @@ const redirect = vi.fn((url: string): never => {
 });
 const revalidatePath = vi.fn();
 
-const getSession = vi.fn<() => Promise<{ sub: string; iat: number; exp: number } | null>>();
+const requireUserId = vi.fn<() => Promise<UserId>>();
 
 // ---- @simplewebauthn/server のモック ----
 const generateRegistrationOptions = vi.fn(async (_opts: unknown) => ({
@@ -85,7 +87,7 @@ vi.mock("next/headers", () => ({
 
 vi.mock("next/navigation", () => ({ redirect: (url: string) => redirect(url) }));
 vi.mock("next/cache", () => ({ revalidatePath: (path: string) => revalidatePath(path) }));
-vi.mock("@/lib/session", () => ({ getSession: () => getSession() }));
+vi.mock("@/lib/session", () => ({ requireUserId: () => requireUserId() }));
 
 // ---- @/lib/credentials のモック ----
 const listCredentials = vi.fn();
@@ -105,11 +107,10 @@ const {
 } = await import("@/app/settings/passkeys/actions");
 const { initialPasskeyActionState } = await import("@/app/settings/passkeys/action-state");
 
-const SESSION = { sub: "owner", iat: 0, exp: 9_999_999_999 };
-
 function makeCredential(overrides: Partial<{ credentialId: string; transports: string[] }> = {}) {
   return {
     id: "cred_1",
+    userId: USER_ID,
     credentialId: "cred-1",
     publicKey: new Uint8Array([1, 2, 3]),
     counter: BigInt(0),
@@ -144,8 +145,8 @@ beforeEach(() => {
   cookieStore.clear();
   redirect.mockClear();
   revalidatePath.mockClear();
-  getSession.mockReset();
-  getSession.mockResolvedValue(SESSION);
+  requireUserId.mockReset();
+  requireUserId.mockResolvedValue(USER_ID);
   generateRegistrationOptions.mockClear();
   verifyRegistrationResponse.mockReset();
   verifyRegistrationResponse.mockResolvedValue({
@@ -173,23 +174,30 @@ beforeEach(() => {
   vi.stubEnv("AUTH_SECRET", SECRET);
   vi.stubEnv("RP_ID", RP_ID);
   vi.stubEnv("RP_ORIGIN", RP_ORIGIN);
-  vi.stubEnv("RECOVERY_MODE", "");
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** requireUserId() が未ログインのときの実際の挙動（redirect(LOGIN_PATH) を呼んで例外を投げる）を再現する */
+function mockUnauthenticated(): void {
+  requireUserId.mockImplementation(() => {
+    redirect("/login");
+    throw new Error("unreachable");
+  });
+}
+
 describe("要ログイン", () => {
   it("startPasskeyRegistrationAction は未ログインなら /login へ redirect し、DB を呼ばない", async () => {
-    getSession.mockResolvedValue(null);
+    mockUnauthenticated();
     await expect(startPasskeyRegistrationAction()).rejects.toThrow("NEXT_REDIRECT");
     expect(redirect).toHaveBeenCalledWith("/login");
     expect(listCredentials).not.toHaveBeenCalled();
   });
 
   it("finishPasskeyRegistrationAction は未ログインなら /login へ redirect する", async () => {
-    getSession.mockResolvedValue(null);
+    mockUnauthenticated();
     await expect(
       finishPasskeyRegistrationAction(regResponse, "iPhone"),
     ).rejects.toThrow("NEXT_REDIRECT");
@@ -197,7 +205,7 @@ describe("要ログイン", () => {
   });
 
   it("deletePasskeyAction は未ログインなら /login へ redirect する", async () => {
-    getSession.mockResolvedValue(null);
+    mockUnauthenticated();
     await expect(
       deletePasskeyAction(initialPasskeyActionState, formDataOf({ id: "cred_1" })),
     ).rejects.toThrow("NEXT_REDIRECT");
@@ -232,6 +240,11 @@ describe("startPasskeyRegistrationAction", () => {
     );
   });
 
+  it("listCredentials を requireUserId が返した userId で呼ぶ（自分の分だけを excludeCredentials にする）", async () => {
+    await startPasskeyRegistrationAction();
+    expect(listCredentials).toHaveBeenCalledWith(expect.anything(), USER_ID);
+  });
+
   it("RP_ID/RP_ORIGIN 未設定なら configMissing を返す（ここでは理由を出してよい）", async () => {
     vi.stubEnv("RP_ID", "");
     const result = await startPasskeyRegistrationAction();
@@ -247,7 +260,7 @@ describe("finishPasskeyRegistrationAction", () => {
     const result = await finishPasskeyRegistrationAction(regResponse, "iPhone");
 
     expect(result).toEqual({ ok: true });
-    expect(createCredential).toHaveBeenCalledWith(expect.anything(), {
+    expect(createCredential).toHaveBeenCalledWith(expect.anything(), USER_ID, {
       credentialId: "cred-1",
       publicKey: new Uint8Array([1, 2, 3]),
       counter: 0,
@@ -269,6 +282,7 @@ describe("finishPasskeyRegistrationAction", () => {
 
     expect(createCredential).toHaveBeenCalledWith(
       expect.anything(),
+      USER_ID,
       expect.objectContaining({ transports: [] }),
     );
   });
@@ -366,17 +380,11 @@ describe("deletePasskeyAction", () => {
     expect(deleteCredential).not.toHaveBeenCalled();
   });
 
-  it("成功時は error:null を返し一覧を revalidate する", async () => {
+  it("成功時は error:null を返し一覧を revalidate する。deleteCredential は requireUserId の userId と id を渡す", async () => {
     const result = await deletePasskeyAction(initialPasskeyActionState, formDataOf({ id: "cred_1" }));
     expect(result).toEqual({ error: null });
-    expect(deleteCredential).toHaveBeenCalledWith(expect.anything(), "cred_1", false);
+    expect(deleteCredential).toHaveBeenCalledWith(expect.anything(), USER_ID, "cred_1");
     expect(revalidatePath).toHaveBeenCalledWith("/settings/passkeys");
-  });
-
-  it("RECOVERY_MODE=1 のときは deleteCredential に true を渡す", async () => {
-    vi.stubEnv("RECOVERY_MODE", "1");
-    await deletePasskeyAction(initialPasskeyActionState, formDataOf({ id: "cred_1" }));
-    expect(deleteCredential).toHaveBeenCalledWith(expect.anything(), "cred_1", true);
   });
 
   it("最後の1本（データ層が deleteLastOne を返す）は拒否し、revalidate しない", async () => {

@@ -1,13 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 
-import { LOGIN_PATH } from "@/lib/auth";
 import { validateIncomeId, validateIncomeInput } from "@/lib/income-validation";
 import { createIncome, deleteIncome } from "@/lib/incomes";
 import { prisma } from "@/lib/prisma";
-import { getSession } from "@/lib/session";
+import { requireUserId } from "@/lib/session";
 
 import { DASHBOARD_PATH } from "../dashboard-path";
 import { INCOMES_PATH, type IncomeActionState } from "./action-state";
@@ -19,15 +17,11 @@ import { INCOMES_PATH, type IncomeActionState } from "./action-state";
  * 失敗時は例外を投げずに利用者向けの日本語メッセージを返す。
  *
  * Server Action は POST エンドポイントとして直接叩けるため、
- * 画面側のガード（proxy）とは別に各アクションでもセッションを確認する。
+ * 画面側のガード（proxy）とは別に各アクションの先頭で requireUserId() を呼び、
+ * データ層へは必ずその戻り値（ログイン中の利用者ID）を渡す（docs/steps/pub-1.md）。
  *
  * **更新は無い。** 追加と削除だけ（docs/steps/step-6.md「編集画面は作らない」）。
  */
-
-async function requireSession(): Promise<void> {
-  const session = await getSession();
-  if (!session) redirect(LOGIN_PATH);
-}
 
 /**
  * 収入画面とダッシュボードの両方を更新する。
@@ -49,7 +43,7 @@ export async function createIncomeAction(
   prevState: IncomeActionState,
   formData: FormData,
 ): Promise<IncomeActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const validated = validateIncomeInput({
     yearMonth: formData.get("yearMonth"),
@@ -58,7 +52,7 @@ export async function createIncomeAction(
   });
   if (!validated.ok) return { error: validated.error, savedCount: prevState.savedCount };
 
-  const result = await createIncome(prisma, validated.value);
+  const result = await createIncome(prisma, userId, validated.value);
   if (!result.ok) return { error: result.error, savedCount: prevState.savedCount };
 
   revalidateIncomes();
@@ -70,12 +64,12 @@ export async function deleteIncomeAction(
   prevState: IncomeActionState,
   formData: FormData,
 ): Promise<IncomeActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateIncomeId(formData.get("id"));
   if (!id.ok) return { error: id.error, savedCount: prevState.savedCount };
 
-  const result = await deleteIncome(prisma, id.value);
+  const result = await deleteIncome(prisma, userId, id.value);
   if (!result.ok) return { error: result.error, savedCount: prevState.savedCount };
 
   revalidateIncomes();

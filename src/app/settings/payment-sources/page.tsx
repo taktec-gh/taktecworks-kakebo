@@ -4,6 +4,7 @@ import { connection } from "next/server";
 
 import { listPaymentSources } from "@/lib/payment-sources";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 
 import { createPaymentSourceAction, movePaymentSourceAction } from "./actions";
 import { PaymentSourceCreateForm } from "./payment-source-create-form";
@@ -21,7 +22,9 @@ export const metadata: Metadata = {
  */
 export default async function PaymentSourcesPage() {
   await connection();
-  const sources = await listPaymentSources(prisma);
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
+  const sources = await listPaymentSources(prisma, userId);
 
   return (
     <main className="mx-auto flex w-full max-w-md flex-col gap-6 px-4 py-6">

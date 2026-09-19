@@ -9,6 +9,7 @@ import type {
 } from "@/generated/prisma/client";
 
 import { getMonthDateRange } from "@/lib/expense-date";
+import type { UserId } from "@/lib/user-id";
 import { canShiftYearMonth, previousYearMonth } from "@/lib/year-month";
 
 /**
@@ -18,6 +19,8 @@ import { canShiftYearMonth, previousYearMonth } from "@/lib/year-month";
  * PrismaClient は引数で受け取る。このモジュールはサーバー専用。
  *
  * 集計そのものは行わない。計算は純粋関数（src/lib/dashboard.ts）の担当。
+ *
+ * **7本のクエリすべてを userId で絞る（docs/steps/pub-1.md 設計判断 6）。**
  */
 
 export type DashboardData = {
@@ -46,6 +49,7 @@ export type DashboardData = {
  */
 export async function getDashboardData(
   client: PrismaClient,
+  userId: UserId,
   yearMonth: string,
 ): Promise<DashboardData> {
   const range = getMonthDateRange(yearMonth);
@@ -61,21 +65,23 @@ export async function getDashboardData(
     previousMonthIncomes,
   ] = await Promise.all([
     client.paymentSource.findMany({
+      where: { userId },
       orderBy: [{ isActive: "desc" }, { sortOrder: "asc" }, { id: "asc" }],
     }),
     client.category.findMany({
+      where: { userId },
       orderBy: [{ isHidden: "asc" }, { sortOrder: "asc" }, { id: "asc" }],
     }),
-    client.budget.findMany({ where: { yearMonth } }),
-    client.categoryBudget.findMany({ where: { yearMonth } }),
-    client.expense.findMany({ where: { date: { gte: range.gte, lt: range.lt } } }),
+    client.budget.findMany({ where: { userId, yearMonth } }),
+    client.categoryBudget.findMany({ where: { userId, yearMonth } }),
+    client.expense.findMany({ where: { userId, date: { gte: range.gte, lt: range.lt } } }),
     client.income.findMany({
-      where: { yearMonth },
+      where: { userId, yearMonth },
       orderBy: [{ createdAt: "desc" }, { id: "asc" }],
     }),
     hasPreviousMonth
       ? client.income.findMany({
-          where: { yearMonth: previousYearMonth(yearMonth) },
+          where: { userId, yearMonth: previousYearMonth(yearMonth) },
           orderBy: [{ createdAt: "desc" }, { id: "asc" }],
         })
       : Promise.resolve<Income[]>([]),

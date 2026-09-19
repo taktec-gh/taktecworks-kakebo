@@ -16,6 +16,9 @@ import { defineConfig } from "prisma/config";
  * マイグレーションを実行する schema engine は
  * アドバイザリロックや DDL のために非プール接続を必要とするため、
  * CLI 側の url そのものを Neon の直接接続（DIRECT_URL）にする。
+ *
+ * `migrations.seed` は持たない。公開版の初期データは全体ではなく利用者ごとに
+ * ユーザー作成時に投入する（src/lib/users.ts の createUserWithPresets。docs/steps/pub-1.md 設計判断 8）。
  */
 const cliDatabaseUrl = process.env["DIRECT_URL"] ?? process.env["DATABASE_URL"];
 
@@ -23,7 +26,6 @@ export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
-    seed: "tsx prisma/seed.ts",
   },
   datasource: {
     url: cliDatabaseUrl,

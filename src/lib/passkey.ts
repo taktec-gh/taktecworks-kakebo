@@ -16,20 +16,23 @@ import type {
  * ここには持ち込まない。Cookie の副作用は src/lib/passkey-session.ts、
  * DB は src/lib/credentials.ts の担当。
  *
- * 設計の出典は docs/steps/step-7.md。要点:
- * - パスキーは「2要素目」ではなく「パスワードの置き換え」。資格情報が1件でもあれば
- *   パスワード単独ログインを拒否する（フラグではなく件数から導く）
+ * 設計の出典は docs/steps/step-7.md と docs/steps/pub-1.md。要点:
+ * - 公開版ではパスワードログインと緊急脱出モードを廃止した。ログイン手段はパスキーのみ
  * - チャレンジは DB に置かず、有効期限2分の署名付き Cookie（JWT）にする。
- *   セッション JWT との取り違えを防ぐため sub を別にする
+ *   セッション JWT は typ ヘッダ（SESSION_JWT_TYP）を必須にしているため、
+ *   typ を持たないチャレンジ JWT をセッションとして使うことはできない
  */
 
 /** RP の表示名。ブラウザの登録ダイアログに出る。秘密ではないので定数でよい */
 export const RP_NAME = "家計簿";
 
-/** WebAuthn の利用者名。利用者は1人なので固定値 */
+/**
+ * WebAuthn の利用者名。単一ユーザー版からの固定値。
+ * ユーザーごとのランダム化は後の Step（docs/steps/pub-1.md「含めない」）。
+ */
 export const PASSKEY_USER_NAME = "owner";
 
-/** チャレンジ JWT の sub。セッション JWT（"owner"）と必ず別の値にする */
+/** チャレンジ JWT の sub。用途（登録 / 認証）の取り違えを防ぐ */
 export const REGISTER_CHALLENGE_SUBJECT = "passkey-register";
 export const AUTH_CHALLENGE_SUBJECT = "passkey-auth";
 
@@ -103,39 +106,13 @@ export function getRpConfig(env: EnvSource = process.env): RpConfig {
 }
 
 /**
- * 締め出しからの緊急脱出モードか。
- *
- * 文字列 "1" のときだけ true。"true" や "0" は false
- * （曖昧な値で意図せず穴が開かないようにする）。
- */
-export function isRecoveryMode(env: EnvSource = process.env): boolean {
-  return env.RECOVERY_MODE === "1";
-}
-
-/**
- * パスキーを必須とするか。
- *
- * 環境変数のフラグにしない。パスキーを登録したのに切り替えを忘れると
- * 穴が空いたままになるため、件数から導いて自動的に閉まるようにする。
- */
-export function shouldRequirePasskey(credentialCount: number, recoveryMode: boolean): boolean {
-  if (recoveryMode) return false;
-  return credentialCount > 0;
-}
-
-/**
  * 資格情報を削除してよいか。削除できないときは理由の文言を返す。
  *
- * パスキー必須の状態で最後の1本を消すと、二度とログインできなくなる。
- * RECOVERY_MODE=1 のときはパスワードで入れるので消せる。
+ * ログイン手段はパスキーだけなので、最後の1本を消すと二度とログインできなくなる。
  *
- * @param totalCount 削除する前の総件数
+ * @param totalCount 削除する前の、**その利用者の**パスキーの件数
  */
-export function getCredentialDeleteBlockedReason(
-  totalCount: number,
-  recoveryMode: boolean,
-): string | null {
-  if (recoveryMode) return null;
+export function getCredentialDeleteBlockedReason(totalCount: number): string | null {
   if (totalCount <= 1) return PASSKEY_ERRORS.deleteLastOne;
   return null;
 }
@@ -219,8 +196,9 @@ export type CreateChallengeTokenOptions = {
 /**
  * チャレンジを署名付きトークンに包む。
  *
- * セッション JWT と同じ鍵・同じアルゴリズムだが sub が異なるため、
- * 片方をもう片方として使うことはできない。
+ * セッション JWT と同じ鍵・同じアルゴリズムだが、セッション JWT の検証は typ ヘッダ
+ * （SESSION_JWT_TYP）を必須にしており、チャレンジ JWT には typ を付けないため
+ * セッションとしては通らない。逆方向は sub（用途ごとの固定値）で弾く。
  *
  * @throws secret が空文字の場合 Error("AUTH_SECRET is not set")
  */

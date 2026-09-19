@@ -18,7 +18,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WasteTag } from "@/generated/prisma/enums";
 import { EXPENSE_ERRORS } from "@/lib/expenses";
 import { EXPENSE_VALIDATION_ERRORS } from "@/lib/expense-validation";
+import type { UserId } from "@/lib/user-id";
 import { EXPENSES_PATH } from "@/app/expenses/action-state";
+
+const USER_ID = "user_1" as UserId;
 
 class RedirectError extends Error {
   digest: string;
@@ -32,7 +35,7 @@ const redirect = vi.fn((url: string): never => {
   throw new RedirectError(url);
 });
 const revalidatePath = vi.fn();
-const getSession = vi.fn<() => Promise<{ sub: string; iat: number; exp: number } | null>>();
+const requireUserId = vi.fn<() => Promise<UserId>>();
 
 const createExpense = vi.fn();
 const updateExpense = vi.fn();
@@ -40,7 +43,7 @@ const deleteExpense = vi.fn();
 
 vi.mock("next/navigation", () => ({ redirect: (url: string) => redirect(url) }));
 vi.mock("next/cache", () => ({ revalidatePath: (path: string) => revalidatePath(path) }));
-vi.mock("@/lib/session", () => ({ getSession: () => getSession() }));
+vi.mock("@/lib/session", () => ({ requireUserId: () => requireUserId() }));
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/expenses", async () => {
   const actual = await vi.importActual<typeof import("@/lib/expenses")>("@/lib/expenses");
@@ -56,8 +59,6 @@ const { createExpenseAction, deleteExpenseAction, updateExpenseAction } = await 
   "@/app/expenses/actions"
 );
 const { initialExpenseActionState } = await import("@/app/expenses/action-state");
-
-const SESSION = { sub: "owner", iat: 0, exp: 9_999_999_999 };
 
 function validFormData(overrides: Record<string, string> = {}): FormData {
   const formData = new FormData();
@@ -80,8 +81,8 @@ function validFormData(overrides: Record<string, string> = {}): FormData {
 beforeEach(() => {
   redirect.mockClear();
   revalidatePath.mockClear();
-  getSession.mockReset();
-  getSession.mockResolvedValue(SESSION);
+  requireUserId.mockReset();
+  requireUserId.mockResolvedValue(USER_ID);
   createExpense.mockReset();
   updateExpense.mockReset();
   deleteExpense.mockReset();
@@ -90,6 +91,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+/** requireUserId() が未ログインのときの実際の挙動（redirect(LOGIN_PATH) を呼んで例外を投げる）を再現する */
+function mockUnauthenticated(): void {
+  requireUserId.mockImplementation(() => {
+    redirect("/login");
+    throw new Error("unreachable");
+  });
+}
 
 describe("認証なしアクセスの拒否", () => {
   const cases: Array<[string, () => Promise<unknown>, ReturnType<typeof vi.fn>]> = [
@@ -110,7 +119,7 @@ describe("認証なしアクセスの拒否", () => {
   it.each(cases)(
     "%s はセッションが無ければ /login へ redirect し、データ層を呼ばない",
     async (_label, run, dataFn) => {
-      getSession.mockResolvedValue(null);
+      mockUnauthenticated();
       await expect(run()).rejects.toThrow("NEXT_REDIRECT");
       expect(redirect).toHaveBeenCalledWith("/login");
       expect(dataFn).not.toHaveBeenCalled();
@@ -203,7 +212,7 @@ describe("updateExpenseAction", () => {
       validFormData({ id: "exp_1" }),
     );
 
-    expect(updateExpense).toHaveBeenCalledWith(expect.anything(), "exp_1", expect.anything());
+    expect(updateExpense).toHaveBeenCalledWith(expect.anything(), USER_ID, "exp_1", expect.anything());
     expect(result).toEqual({ error: null, savedCount: 1 });
     expect(redirect).not.toHaveBeenCalled();
   });
@@ -239,7 +248,7 @@ describe("deleteExpenseAction", () => {
       "NEXT_REDIRECT",
     );
 
-    expect(deleteExpense).toHaveBeenCalledWith(expect.anything(), "exp_1");
+    expect(deleteExpense).toHaveBeenCalledWith(expect.anything(), USER_ID, "exp_1");
     expect(revalidatePath).toHaveBeenCalledWith(EXPENSES_PATH);
     expect(redirect).toHaveBeenCalledWith(EXPENSES_PATH);
   });

@@ -23,9 +23,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOGIN_PATH } from "@/lib/auth";
 import { INCOME_ERRORS } from "@/lib/incomes";
 import { INCOME_VALIDATION_ERRORS } from "@/lib/income-validation";
+import type { UserId } from "@/lib/user-id";
 import { YEAR_MONTH_ERRORS } from "@/lib/year-month";
 import { DASHBOARD_PATH } from "@/app/dashboard-path";
 import { INCOMES_PATH } from "@/app/incomes/action-state";
+
+const USER_ID = "user_1" as UserId;
 
 class RedirectError extends Error {
   digest: string;
@@ -39,14 +42,14 @@ const redirect = vi.fn((url: string): never => {
   throw new RedirectError(url);
 });
 const revalidatePath = vi.fn();
-const getSession = vi.fn<() => Promise<{ sub: string; iat: number; exp: number } | null>>();
+const requireUserId = vi.fn<() => Promise<UserId>>();
 
 const createIncome = vi.fn();
 const deleteIncome = vi.fn();
 
 vi.mock("next/navigation", () => ({ redirect: (url: string) => redirect(url) }));
 vi.mock("next/cache", () => ({ revalidatePath: (path: string) => revalidatePath(path) }));
-vi.mock("@/lib/session", () => ({ getSession: () => getSession() }));
+vi.mock("@/lib/session", () => ({ requireUserId: () => requireUserId() }));
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/incomes", async () => {
   const actual = await vi.importActual<typeof import("@/lib/incomes")>("@/lib/incomes");
@@ -60,8 +63,6 @@ vi.mock("@/lib/incomes", async () => {
 const { createIncomeAction, deleteIncomeAction } = await import("@/app/incomes/actions");
 const { initialIncomeActionState } = await import("@/app/incomes/action-state");
 
-const SESSION = { sub: "owner", iat: 0, exp: 9_999_999_999 };
-
 function formDataOf(entries: Record<string, string>): FormData {
   const formData = new FormData();
   for (const [key, value] of Object.entries(entries)) {
@@ -73,8 +74,8 @@ function formDataOf(entries: Record<string, string>): FormData {
 beforeEach(() => {
   redirect.mockClear();
   revalidatePath.mockClear();
-  getSession.mockReset();
-  getSession.mockResolvedValue(SESSION);
+  requireUserId.mockReset();
+  requireUserId.mockResolvedValue(USER_ID);
   createIncome.mockReset();
   deleteIncome.mockReset();
 });
@@ -82,6 +83,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+/** requireUserId() が未ログインのときの実際の挙動（redirect(LOGIN_PATH) を呼んで例外を投げる）を再現する */
+function mockUnauthenticated(): void {
+  requireUserId.mockImplementation(() => {
+    redirect(LOGIN_PATH);
+    throw new Error("unreachable");
+  });
+}
 
 describe("認証なしアクセスの拒否", () => {
   const cases: Array<[string, () => Promise<unknown>, ReturnType<typeof vi.fn>]> = [
@@ -104,7 +113,7 @@ describe("認証なしアクセスの拒否", () => {
   it.each(cases)(
     "%s はセッションが無ければ /login へ redirect し、データ層を呼ばない",
     async (_label, run, dataFn) => {
-      getSession.mockResolvedValue(null);
+      mockUnauthenticated();
       await expect(run()).rejects.toThrow("NEXT_REDIRECT");
       expect(redirect).toHaveBeenCalledWith(LOGIN_PATH);
       expect(dataFn).not.toHaveBeenCalled();
@@ -157,7 +166,7 @@ describe("createIncomeAction", () => {
       formDataOf({ yearMonth: "2026-08", amount: "300000", label: "給与" }),
     );
 
-    expect(createIncome).toHaveBeenCalledWith(expect.anything(), {
+    expect(createIncome).toHaveBeenCalledWith(expect.anything(), USER_ID, {
       yearMonth: "2026-08",
       amountYen: 300_000,
       label: "給与",
@@ -206,7 +215,7 @@ describe("deleteIncomeAction", () => {
       formDataOf({ id: "income_1" }),
     );
 
-    expect(deleteIncome).toHaveBeenCalledWith(expect.anything(), "income_1");
+    expect(deleteIncome).toHaveBeenCalledWith(expect.anything(), USER_ID, "income_1");
     expect(revalidatePath).toHaveBeenCalledWith(INCOMES_PATH);
     expect(revalidatePath).toHaveBeenCalledWith(DASHBOARD_PATH);
     expect(result).toEqual({ error: null, savedCount: 1 });

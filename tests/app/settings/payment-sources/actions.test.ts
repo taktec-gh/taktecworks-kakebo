@@ -16,7 +16,10 @@ import { PaymentSourceType } from "@/generated/prisma/enums";
 import { PAYMENT_SOURCE_ORDER_ERRORS } from "@/lib/payment-source-order";
 import { PAYMENT_SOURCE_VALIDATION_ERRORS } from "@/lib/payment-source-validation";
 import { PAYMENT_SOURCE_ERRORS } from "@/lib/payment-sources";
+import type { UserId } from "@/lib/user-id";
 import { PAYMENT_SOURCES_PATH, paymentSourceDetailPath } from "@/app/settings/payment-sources/action-state";
+
+const USER_ID = "user_1" as UserId;
 
 /** redirect は本来 NEXT_REDIRECT を throw して制御を打ち切る。その挙動を再現する */
 class RedirectError extends Error {
@@ -31,7 +34,7 @@ const redirect = vi.fn((url: string): never => {
   throw new RedirectError(url);
 });
 const revalidatePath = vi.fn();
-const getSession = vi.fn<() => Promise<{ sub: string; iat: number; exp: number } | null>>();
+const requireUserId = vi.fn<() => Promise<UserId>>();
 
 const createPaymentSource = vi.fn();
 const updatePaymentSource = vi.fn();
@@ -42,7 +45,7 @@ const deletePaymentSource = vi.fn();
 
 vi.mock("next/navigation", () => ({ redirect: (url: string) => redirect(url) }));
 vi.mock("next/cache", () => ({ revalidatePath: (path: string) => revalidatePath(path) }));
-vi.mock("@/lib/session", () => ({ getSession: () => getSession() }));
+vi.mock("@/lib/session", () => ({ requireUserId: () => requireUserId() }));
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/payment-sources", async () => {
   const actual = await vi.importActual<typeof import("@/lib/payment-sources")>(
@@ -71,11 +74,10 @@ const { initialPaymentSourceActionState } = await import(
   "@/app/settings/payment-sources/action-state"
 );
 
-const SESSION = { sub: "owner", iat: 0, exp: 9_999_999_999 };
-
 function makePaymentSource(overrides: Partial<PaymentSource> = {}): PaymentSource {
   return {
     id: "ps_1",
+    userId: USER_ID,
     name: "現金",
     type: PaymentSourceType.CASH,
     sortOrder: 1,
@@ -98,8 +100,8 @@ function formDataOf(entries: Record<string, string>): FormData {
 beforeEach(() => {
   redirect.mockClear();
   revalidatePath.mockClear();
-  getSession.mockReset();
-  getSession.mockResolvedValue(SESSION);
+  requireUserId.mockReset();
+  requireUserId.mockResolvedValue(USER_ID);
   createPaymentSource.mockReset();
   updatePaymentSource.mockReset();
   setDefaultPaymentSource.mockReset();
@@ -111,6 +113,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+/** requireUserId() が未ログインのときの実際の挙動（redirect(LOGIN_PATH) を呼んで例外を投げる）を再現する */
+function mockUnauthenticated(): void {
+  requireUserId.mockImplementation(() => {
+    redirect("/login");
+    throw new Error("unreachable");
+  });
+}
 
 /** 全 Server Action に共通する認証ガードのテスト */
 describe("認証なしアクセスの拒否", () => {
@@ -167,7 +177,7 @@ describe("認証なしアクセスの拒否", () => {
   ];
 
   it.each(cases)("%s はセッションが無ければ /login へ redirect し、データ層を呼ばない", async (_label, run, dataFn) => {
-    getSession.mockResolvedValue(null);
+    mockUnauthenticated();
     await expect(run()).rejects.toThrow("NEXT_REDIRECT");
     expect(redirect).toHaveBeenCalledWith("/login");
     expect(dataFn).not.toHaveBeenCalled();
@@ -201,7 +211,7 @@ describe("createPaymentSourceAction", () => {
       formDataOf({ name: "  Aカード  ", type: PaymentSourceType.CREDIT_CARD }),
     );
 
-    expect(createPaymentSource).toHaveBeenCalledWith(expect.anything(), {
+    expect(createPaymentSource).toHaveBeenCalledWith(expect.anything(), USER_ID, {
       name: "Aカード",
       type: PaymentSourceType.CREDIT_CARD,
     });
@@ -243,7 +253,7 @@ describe("updatePaymentSourceAction", () => {
       formDataOf({ id: "ps_1", name: "A銀行", type: PaymentSourceType.BANK_DEBIT }),
     );
 
-    expect(updatePaymentSource).toHaveBeenCalledWith(expect.anything(), {
+    expect(updatePaymentSource).toHaveBeenCalledWith(expect.anything(), USER_ID, {
       id: "ps_1",
       name: "A銀行",
       type: PaymentSourceType.BANK_DEBIT,
@@ -287,7 +297,7 @@ describe("setDefaultPaymentSourceAction", () => {
       formDataOf({ id: "ps_1" }),
     );
 
-    expect(setDefaultPaymentSource).toHaveBeenCalledWith(expect.anything(), "ps_1");
+    expect(setDefaultPaymentSource).toHaveBeenCalledWith(expect.anything(), USER_ID, "ps_1");
     expect(revalidatePath).toHaveBeenCalledWith(PAYMENT_SOURCES_PATH);
     expect(revalidatePath).toHaveBeenCalledWith(paymentSourceDetailPath("ps_1"));
     expect(result).toEqual({ error: null });
@@ -327,7 +337,7 @@ describe("setPaymentSourceActiveAction", () => {
       formDataOf({ id: "ps_1", isActive: "true" }),
     );
 
-    expect(setPaymentSourceActive).toHaveBeenCalledWith(expect.anything(), "ps_1", true);
+    expect(setPaymentSourceActive).toHaveBeenCalledWith(expect.anything(), USER_ID, "ps_1", true);
   });
 
   it.each(["false", "", "TRUE", "1"])(
@@ -340,7 +350,7 @@ describe("setPaymentSourceActiveAction", () => {
         formDataOf({ id: "ps_1", isActive: value }),
       );
 
-      expect(setPaymentSourceActive).toHaveBeenCalledWith(expect.anything(), "ps_1", false);
+      expect(setPaymentSourceActive).toHaveBeenCalledWith(expect.anything(), USER_ID, "ps_1", false);
     },
   );
 
@@ -349,7 +359,7 @@ describe("setPaymentSourceActiveAction", () => {
 
     await setPaymentSourceActiveAction(initialPaymentSourceActionState, formDataOf({ id: "ps_1" }));
 
-    expect(setPaymentSourceActive).toHaveBeenCalledWith(expect.anything(), "ps_1", false);
+    expect(setPaymentSourceActive).toHaveBeenCalledWith(expect.anything(), USER_ID, "ps_1", false);
   });
 
   it("データ層が拒否した場合（有効が1件だけ等）はそのメッセージを返す", async () => {
@@ -395,7 +405,7 @@ describe("movePaymentSourceAction", () => {
       formDataOf({ id: "ps_1", direction: "down" }),
     );
 
-    expect(movePaymentSource).toHaveBeenCalledWith(expect.anything(), "ps_1", "down");
+    expect(movePaymentSource).toHaveBeenCalledWith(expect.anything(), USER_ID, "ps_1", "down");
     expect(revalidatePath).toHaveBeenCalledWith(PAYMENT_SOURCES_PATH);
     expect(revalidatePath).toHaveBeenCalledWith(paymentSourceDetailPath("ps_1"));
     expect(result).toEqual({ error: null });

@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { SESSION_SUBJECT, createSessionToken } from "@/lib/auth";
+import { createSessionToken } from "@/lib/auth";
 import {
   AUTH_CHALLENGE_COOKIE_NAME,
   AUTH_CHALLENGE_SUBJECT,
@@ -25,16 +25,16 @@ import {
   getCredentialDeleteBlockedReason,
   getRpConfig,
   isCounterRegression,
-  isRecoveryMode,
-  shouldRequirePasskey,
   toAuthenticatorTransports,
   validateCredentialId,
   validateDeviceName,
   verifyChallengeToken,
 } from "@/lib/passkey";
+import type { UserId } from "@/lib/user-id";
 
 const SECRET = "test-auth-secret-0123456789abcdef";
 const OTHER_SECRET = "another-auth-secret-fedcba9876543210";
+const USER_ID = "user_1" as UserId;
 
 describe("getChallengeSubject / getChallengeCookieName", () => {
   it("register の sub は passkey-register、Cookie 名は kakeibo_passkey_register", () => {
@@ -51,10 +51,11 @@ describe("getChallengeSubject / getChallengeCookieName", () => {
     expect(getChallengeCookieName("authenticate")).toBe("kakeibo_passkey_auth");
   });
 
-  it("セッション JWT の sub（'owner'）とは異なる", () => {
-    expect(getChallengeSubject("register")).not.toBe(SESSION_SUBJECT);
-    expect(getChallengeSubject("authenticate")).not.toBe(SESSION_SUBJECT);
-  });
+  // 「セッション JWT の sub とは異なる」という単体の等値比較は、公開版では sub が
+  // 固定値の "owner" ではなくユーザーID（cuid、可変）になったため書けない。
+  // 実際の防御（セッション JWT をチャレンジとして使えないこと）は typ ヘッダ ではなく
+  // このファイルの createChallengeToken/verifyChallengeToken の「チャレンジの取り違え:
+  // セッション JWT をチャレンジとして渡すと null」で直接検証する。
 });
 
 describe("getRpConfig", () => {
@@ -115,55 +116,21 @@ describe("getRpConfig", () => {
   });
 });
 
-describe("isRecoveryMode", () => {
-  it("'1' のときだけ true", () => {
-    expect(isRecoveryMode({ RECOVERY_MODE: "1" })).toBe(true);
+// isRecoveryMode / shouldRequirePasskey は公開版で廃止（docs/steps/pub-1.md 設計判断 1）。
+// RECOVERY_MODE の環境変数1本で全利用者のパスキー必須化を解除する仕組みは、
+// 複数ユーザー化と両立しないため削除された（src/lib/passkey.ts に export が無いことを確認済み）。
+
+describe("getCredentialDeleteBlockedReason（ユーザー単位の件数で判定。recoveryMode 引数は無い）", () => {
+  it("残り1本なら削除不可の理由を返す", () => {
+    expect(getCredentialDeleteBlockedReason(1)).toBe(PASSKEY_ERRORS.deleteLastOne);
   });
 
-  it.each([["true"], ["0"], [""], [undefined]])("'%s' は false", (value) => {
-    expect(isRecoveryMode({ RECOVERY_MODE: value })).toBe(false);
+  it("残り0本（矛盾状態）でも削除不可扱い", () => {
+    expect(getCredentialDeleteBlockedReason(0)).toBe(PASSKEY_ERRORS.deleteLastOne);
   });
 
-  it("キー自体が無い場合も false", () => {
-    expect(isRecoveryMode({})).toBe(false);
-  });
-});
-
-describe("shouldRequirePasskey（設計判断1の判定表）", () => {
-  it("件数0・RECOVERY_MODE未設定 → 通す（false）", () => {
-    expect(shouldRequirePasskey(0, false)).toBe(false);
-  });
-
-  it("件数1以上・RECOVERY_MODE未設定 → 拒否（true）", () => {
-    expect(shouldRequirePasskey(1, false)).toBe(true);
-    expect(shouldRequirePasskey(5, false)).toBe(true);
-  });
-
-  it("件数0・RECOVERY_MODE=1 → 通す（false）", () => {
-    expect(shouldRequirePasskey(0, true)).toBe(false);
-  });
-
-  it("件数1以上・RECOVERY_MODE=1 → 通す（false、緊急脱出）", () => {
-    expect(shouldRequirePasskey(1, true)).toBe(false);
-    expect(shouldRequirePasskey(100, true)).toBe(false);
-  });
-});
-
-describe("getCredentialDeleteBlockedReason", () => {
-  it("RECOVERY_MODE 未設定・残り1本なら削除不可の理由を返す", () => {
-    expect(getCredentialDeleteBlockedReason(1, false)).toBe(PASSKEY_ERRORS.deleteLastOne);
-  });
-
-  it("RECOVERY_MODE 未設定・残り0本（矛盾状態）でも削除不可扱い", () => {
-    expect(getCredentialDeleteBlockedReason(0, false)).toBe(PASSKEY_ERRORS.deleteLastOne);
-  });
-
-  it("RECOVERY_MODE 未設定・残り2本以上なら削除できる（null）", () => {
-    expect(getCredentialDeleteBlockedReason(2, false)).toBeNull();
-  });
-
-  it("RECOVERY_MODE=1 なら残り1本でも削除できる（null）", () => {
-    expect(getCredentialDeleteBlockedReason(1, true)).toBeNull();
+  it("残り2本以上なら削除できる（null）", () => {
+    expect(getCredentialDeleteBlockedReason(2)).toBeNull();
   });
 });
 
@@ -306,8 +273,8 @@ describe("createChallengeToken / verifyChallengeToken", () => {
     ).resolves.toBeNull();
   });
 
-  it("チャレンジの取り違え: セッション JWT をチャレンジとして渡すと null（sub が 'owner'）", async () => {
-    const sessionToken = await createSessionToken(SECRET, { now: NOW });
+  it("チャレンジの取り違え: セッション JWT をチャレンジとして渡すと null（sub がユーザーID）", async () => {
+    const sessionToken = await createSessionToken(SECRET, USER_ID, { now: NOW });
     await expect(
       verifyChallengeToken(sessionToken, "authenticate", SECRET, { now: NOW }),
     ).resolves.toBeNull();

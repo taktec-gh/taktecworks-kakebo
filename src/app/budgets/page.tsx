@@ -5,6 +5,7 @@ import { connection } from "next/server";
 import { buildBudgetSummary, buildCategoryBudgetSummary } from "@/lib/budget-calculation";
 import { getMonthlyBudgetData } from "@/lib/budgets";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 import { getCurrentYearMonth, resolveYearMonth } from "@/lib/year-month";
 
 import { CATEGORIES_PATH } from "../settings/categories/action-state";
@@ -35,13 +36,15 @@ export default async function BudgetsPage({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
 
   const params = await searchParams;
   // 「今月」は純粋関数に現在時刻を渡して求める（JST 固定）
   const currentYearMonth = getCurrentYearMonth(new Date());
   const yearMonth = resolveYearMonth(params[YEAR_MONTH_PARAM], new Date());
 
-  const data = await getMonthlyBudgetData(prisma, yearMonth);
+  const data = await getMonthlyBudgetData(prisma, userId, yearMonth);
   const summary = buildBudgetSummary(data.paymentSources, data.budgets);
   const categorySummary = buildCategoryBudgetSummary(data.categories, data.categoryBudgets);
 

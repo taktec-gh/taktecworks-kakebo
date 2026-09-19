@@ -27,8 +27,12 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DashboardData } from "@/lib/dashboard-data";
+import type { UserId } from "@/lib/user-id";
 
-const getDashboardDataMock = vi.fn<(client: unknown, yearMonth: string) => Promise<DashboardData>>();
+const USER_ID = "user_1" as UserId;
+
+const getDashboardDataMock =
+  vi.fn<(client: unknown, userId: UserId, yearMonth: string) => Promise<DashboardData>>();
 
 vi.mock("next/server", () => ({
   // page.tsx は connection() でプリレンダリングを止めるだけ。
@@ -37,15 +41,15 @@ vi.mock("next/server", () => ({
 }));
 
 vi.mock("@/lib/session", () => ({
-  createSession: async () => {},
+  requireUserId: async () => USER_ID,
   destroySession: async () => {},
-  getSession: async () => null,
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 
 vi.mock("@/lib/dashboard-data", () => ({
-  getDashboardData: (client: unknown, yearMonth: string) => getDashboardDataMock(client, yearMonth),
+  getDashboardData: (client: unknown, userId: UserId, yearMonth: string) =>
+    getDashboardDataMock(client, userId, yearMonth),
 }));
 
 const { default: HomePage } = await import("@/app/page");
@@ -91,6 +95,7 @@ function nextId(prefix: string): string {
 function buildPaymentSource(overrides: Partial<PaymentSourceFixture> = {}): PaymentSourceFixture {
   return {
     id: nextId("ps"),
+    userId: USER_ID,
     name: "払い出し先",
     type: PaymentSourceType.CASH,
     sortOrder: 0,
@@ -105,6 +110,7 @@ function buildPaymentSource(overrides: Partial<PaymentSourceFixture> = {}): Paym
 function buildCategory(overrides: Partial<CategoryFixture> = {}): CategoryFixture {
   return {
     id: nextId("cat"),
+    userId: USER_ID,
     name: "カテゴリ",
     costType: CostType.VARIABLE,
     sortOrder: 0,
@@ -118,6 +124,7 @@ function buildCategory(overrides: Partial<CategoryFixture> = {}): CategoryFixtur
 function buildBudget(overrides: Partial<BudgetFixture> = {}): BudgetFixture {
   return {
     id: nextId("budget"),
+    userId: USER_ID,
     paymentSourceId: "ps_1",
     yearMonth: "2026-07",
     amountYen: 0,
@@ -130,6 +137,7 @@ function buildBudget(overrides: Partial<BudgetFixture> = {}): BudgetFixture {
 function buildExpense(overrides: Partial<ExpenseFixture> = {}): ExpenseFixture {
   return {
     id: nextId("exp"),
+    userId: USER_ID,
     date: new Date("2026-07-05T00:00:00.000Z"),
     amountYen: 0,
     categoryId: "cat_1",
@@ -146,6 +154,7 @@ function buildExpense(overrides: Partial<ExpenseFixture> = {}): ExpenseFixture {
 function buildIncome(overrides: Partial<IncomeFixture> = {}): IncomeFixture {
   return {
     id: nextId("income"),
+    userId: USER_ID,
     yearMonth: "2026-07",
     amountYen: 0,
     label: null,
@@ -178,7 +187,7 @@ describe("対象月の解決", () => {
     expect(
       screen.getByRole("heading", { name: "2026年8月の残り使える金額" }),
     ).toBeInTheDocument();
-    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), "2026-08");
+    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-08");
   });
 
   it("?month=2026-07 を指定すればその月を対象にする", async () => {
@@ -189,7 +198,7 @@ describe("対象月の解決", () => {
     expect(
       screen.getByRole("heading", { name: "2026年7月の残り使える金額" }),
     ).toBeInTheDocument();
-    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), "2026-07");
+    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-07");
     // 表示中の月が今月と異なるので月ナビに「今月へ」が出る（今月＝2026年8月であること自体の確認）
     expect(
       screen.getByRole("link", { name: "今月（2026年8月）へ" }),
@@ -201,7 +210,7 @@ describe("対象月の解決", () => {
     const jsx = await HomePage({ searchParams: Promise.resolve({ month: "not-a-month" }) });
     render(jsx);
 
-    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), "2026-08");
+    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-08");
     expect(
       screen.getByRole("heading", { name: "2026年8月の残り使える金額" }),
     ).toBeInTheDocument();
@@ -214,7 +223,7 @@ describe("対象月の解決", () => {
     });
     render(jsx);
 
-    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), "2026-08");
+    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), USER_ID, "2026-08");
   });
 
   it("?month が扱える範囲の下限（0000-01）でも例外を投げずに描画する", async () => {
@@ -226,7 +235,7 @@ describe("対象月の解決", () => {
     const jsx = await HomePage({ searchParams: Promise.resolve({ month: MIN_YEAR_MONTH }) });
 
     expect(() => render(jsx)).not.toThrow();
-    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), MIN_YEAR_MONTH);
+    expect(getDashboardDataMock).toHaveBeenCalledWith(expect.anything(), USER_ID, MIN_YEAR_MONTH);
   });
 });
 

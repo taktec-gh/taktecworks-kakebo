@@ -5,13 +5,10 @@ import {
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 
-import { LOGIN_PATH } from "@/lib/auth";
 import { createCredential, deleteCredential, listCredentials } from "@/lib/credentials";
 import {
   getRpConfig,
-  isRecoveryMode,
   PASSKEY_ERRORS,
   PASSKEY_USER_NAME,
   toAuthenticatorTransports,
@@ -22,7 +19,7 @@ import {
 } from "@/lib/passkey";
 import { consumeChallengeCookie, setChallengeCookie } from "@/lib/passkey-session";
 import { prisma } from "@/lib/prisma";
-import { getSession } from "@/lib/session";
+import { requireUserId } from "@/lib/session";
 
 import { PASSKEYS_PATH, type PasskeyActionState } from "./action-state";
 
@@ -32,28 +29,25 @@ import type { RegistrationResponseJSON } from "@simplewebauthn/server";
  * パスキーの登録・削除（Server Action）。**すべて要ログイン。**
  *
  * Server Action は POST エンドポイントとして直接叩けるため、
- * 画面側のガード（proxy）とは別にここでもセッションを確認する。
+ * 画面側のガード（proxy）とは別に各アクションの先頭で requireUserId() を呼び、
+ * データ層へは必ずその戻り値（ログイン中の利用者ID）を渡す（docs/steps/pub-1.md）。
  *
  * ログイン画面と違い、**ここでは失敗の理由を出してよい**
  * （すでにログインしている本人しか到達しないため。docs/steps/step-7.md「画面」）。
  */
 
-async function requireSession(): Promise<void> {
-  const session = await getSession();
-  if (!session) redirect(LOGIN_PATH);
-}
-
 /**
  * 登録用オプションを作り、チャレンジを短命 Cookie に置く。
  *
- * - `excludeCredentials` に登録済みを並べ、同じ認証器の二重登録を防ぐ
+ * - `excludeCredentials` に**その利用者の**登録済みを並べ、同じ認証器の二重登録を防ぐ。
+ *   全件を並べると他人の資格情報IDがブラウザに渡るので、必ず userId で絞った一覧を使う
  * - `residentKey: "required"` にして discoverable credential を作る。
  *   これによりログイン画面で allowCredentials を晒さずに認証できる
  * - `userVerification: "required"`。パスキー1本でログインできる以上、
  *   生体認証か PIN を必ず挟む
  */
 export async function startPasskeyRegistrationAction(): Promise<PasskeyRegistrationOptionsResult> {
-  await requireSession();
+  const userId = await requireUserId();
 
   let rpConfig: ReturnType<typeof getRpConfig>;
   try {
@@ -62,7 +56,7 @@ export async function startPasskeyRegistrationAction(): Promise<PasskeyRegistrat
     return { ok: false, error: PASSKEY_ERRORS.configMissing };
   }
 
-  const existing = await listCredentials(prisma);
+  const existing = await listCredentials(prisma, userId);
 
   const options = await generateRegistrationOptions({
     rpName: rpConfig.rpName,
@@ -93,7 +87,7 @@ export async function finishPasskeyRegistrationAction(
   response: RegistrationResponseJSON,
   deviceName: string,
 ): Promise<PasskeyVerificationResult> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const validatedName = validateDeviceName(deviceName);
   if (!validatedName.ok) return { ok: false, error: validatedName.error };
@@ -127,7 +121,7 @@ export async function finishPasskeyRegistrationAction(
   }
 
   const { credential } = verification.registrationInfo;
-  const created = await createCredential(prisma, {
+  const created = await createCredential(prisma, userId, {
     credentialId: credential.id,
     publicKey: credential.publicKey,
     counter: credential.counter,
@@ -143,18 +137,18 @@ export async function finishPasskeyRegistrationAction(
 /**
  * 削除。useActionState から呼ぶ前提のシグネチャ。
  *
- * パスキー必須の状態では最後の1本を消せない（判定は credentials.ts）。
+ * その利用者の最後の1本は消せない（判定は credentials.ts）。
  */
 export async function deletePasskeyAction(
   _prevState: PasskeyActionState,
   formData: FormData,
 ): Promise<PasskeyActionState> {
-  await requireSession();
+  const userId = await requireUserId();
 
   const id = validateCredentialId(formData.get("id"));
   if (!id.ok) return { error: id.error };
 
-  const result = await deleteCredential(prisma, id.value, isRecoveryMode());
+  const result = await deleteCredential(prisma, userId, id.value);
   if (!result.ok) return { error: result.error };
 
   revalidatePath(PASSKEYS_PATH);

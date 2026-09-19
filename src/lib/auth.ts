@@ -1,5 +1,7 @@
 import { SignJWT, jwtVerify } from "jose";
 
+import { brandUserIdFromTrustedSource, type UserId } from "@/lib/user-id";
+
 /**
  * 認証まわりの純粋ロジック。
  *
@@ -13,11 +15,19 @@ export const SESSION_COOKIE_NAME = "kakeibo_session";
 /** セッションの有効期間（秒）。既定 30 日 */
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
-/** 利用者は1人だけなので sub は固定値 */
-export const SESSION_SUBJECT = "owner";
-
 /** JWT の署名アルゴリズム */
 export const SESSION_JWT_ALG = "HS256";
+
+/**
+ * セッション JWT の typ ヘッダ。**検証で必須にする。**
+ *
+ * sub がユーザーID（cuid）になったため、sub の値だけではチャレンジ JWT
+ * （sub = "passkey-register" など。同じ鍵・同じアルゴリズムで署名される）と
+ * 区別できない。用途の区別を「cuid が偶然一致しない」ことに頼らないよう、
+ * セッション JWT にだけこの typ を付け、検証で一致を要求する
+ * （docs/steps/pub-1.md 設計判断 8）。
+ */
+export const SESSION_JWT_TYP = "kakebo-session+jwt";
 
 /**
  * ログイン失敗時に画面へ出すメッセージ。
@@ -29,8 +39,8 @@ export const SESSION_JWT_ALG = "HS256";
 export { LOGIN_ERROR_MESSAGE } from "@/lib/auth-messages";
 
 export type SessionPayload = {
-  /** 常に SESSION_SUBJECT */
-  sub: string;
+  /** ログイン中の利用者。署名を検証した JWT の sub */
+  userId: UserId;
   /** 発行時刻（UNIX 秒） */
   iat: number;
   /** 失効時刻（UNIX 秒） */
@@ -38,43 +48,6 @@ export type SessionPayload = {
 };
 
 export type EnvSource = Record<string, string | undefined>;
-
-/**
- * 定数時間に近い文字列比較。
- * 早期 return をしないことで、先頭何文字が一致したかを実行時間から推測されにくくする。
- */
-export function safeEqual(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const left = encoder.encode(a);
-  const right = encoder.encode(b);
-  let diff = left.length ^ right.length;
-  const length = Math.max(left.length, right.length);
-  for (let i = 0; i < length; i += 1) {
-    diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
-  }
-  return diff === 0;
-}
-
-/**
- * 入力パスワードが正しいかを判定する。
- *
- * - 期待値（APP_PASSWORD）が空文字なら常に false。空パスワードでの素通りを防ぐ
- * - 入力が空文字なら常に false
- */
-export function verifyPassword(input: string, expected: string): boolean {
-  if (expected.length === 0) return false;
-  if (input.length === 0) return false;
-  return safeEqual(input, expected);
-}
-
-/** APP_PASSWORD を読む。未設定・空文字なら Error を投げる */
-export function getAppPassword(env: EnvSource = process.env): string {
-  const value = env.APP_PASSWORD;
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error("APP_PASSWORD is not set");
-  }
-  return value;
-}
 
 /** AUTH_SECRET を読む。未設定・空文字なら Error を投げる */
 export function getAuthSecret(env: EnvSource = process.env): string {
@@ -100,21 +73,26 @@ export type CreateSessionTokenOptions = {
 };
 
 /**
- * セッション JWT を発行する。
+ * セッション JWT を発行する。sub にユーザーID、ヘッダの typ に SESSION_JWT_TYP を入れる。
  *
  * @throws secret が空文字の場合 Error("AUTH_SECRET is not set")
+ * @throws userId が空文字の場合 Error（誰でもないセッションを発行しない）
  */
 export async function createSessionToken(
   secret: string,
+  userId: UserId,
   options: CreateSessionTokenOptions = {},
 ): Promise<string> {
   const key = toKey(secret);
+  if (typeof userId !== "string" || userId.length === 0) {
+    throw new Error("user id must be a non-empty string");
+  }
   const issuedAt = Math.floor((options.now?.getTime() ?? Date.now()) / 1000);
   const maxAge = options.maxAgeSeconds ?? SESSION_MAX_AGE_SECONDS;
 
   return new SignJWT({})
-    .setProtectedHeader({ alg: SESSION_JWT_ALG })
-    .setSubject(SESSION_SUBJECT)
+    .setProtectedHeader({ alg: SESSION_JWT_ALG, typ: SESSION_JWT_TYP })
+    .setSubject(userId)
     .setIssuedAt(issuedAt)
     .setExpirationTime(issuedAt + maxAge)
     .sign(key);
@@ -134,7 +112,8 @@ export type VerifySessionTokenOptions = {
  * - 署名が不正（Cookie 改竄・別の鍵で署名）
  * - 有効期限切れ
  * - alg が HS256 以外（alg: none などのダウングレード攻撃）
- * - sub が SESSION_SUBJECT 以外
+ * - typ ヘッダが SESSION_JWT_TYP でない（チャレンジ JWT をセッションとして渡した等）
+ * - sub が文字列でない・空文字
  * - iat / exp が数値でない
  *
  * @throws secret が空文字の場合のみ Error("AUTH_SECRET is not set")
@@ -150,20 +129,25 @@ export async function verifySessionToken(
   try {
     const { payload } = await jwtVerify(token, key, {
       algorithms: [SESSION_JWT_ALG],
-      subject: SESSION_SUBJECT,
+      typ: SESSION_JWT_TYP,
       currentDate: options.now,
     });
 
     if (
       typeof payload.sub !== "string" ||
-      payload.sub !== SESSION_SUBJECT ||
+      payload.sub.length === 0 ||
       typeof payload.iat !== "number" ||
       typeof payload.exp !== "number"
     ) {
       return null;
     }
 
-    return { sub: payload.sub, iat: payload.iat, exp: payload.exp };
+    // 署名・typ・期限を検証済みの sub なので、ここで UserId にしてよい（設計判断 7 の許可リスト）
+    return {
+      userId: brandUserIdFromTrustedSource(payload.sub),
+      iat: payload.iat,
+      exp: payload.exp,
+    };
   } catch {
     return null;
   }

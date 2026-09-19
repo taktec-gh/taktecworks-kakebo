@@ -21,6 +21,7 @@ import {
   EXPENSE_AMOUNT_MIN_YEN,
   isWasteTag,
 } from "@/lib/expense-validation";
+import type { UserId } from "@/lib/user-id";
 import { isYearMonth } from "@/lib/year-month";
 
 /**
@@ -31,6 +32,12 @@ import { isYearMonth } from "@/lib/year-month";
  *
  * **月の絞り込みは `@db.Date` を UTC 深夜で範囲指定する**
  * （src/lib/expense-date.ts の getMonthDateRange。JST の +9 時間を足さない）。
+ *
+ * **全操作を userId で絞る（docs/steps/pub-1.md 設計判断 6）。** 取得・更新・削除は
+ * `where: { id, userId }`、一覧・サジェストの集計も `where` に userId を付ける。
+ * 他人の支出IDには、存在しないIDと同じ notFound を返す。
+ * 登録・更新で受け取る categoryId / paymentSourceId は、その利用者のものか先に確認する
+ * （DB の複合外部キーでも拒否されるが、どちらが悪いかを文言で返すため）。
  *
  * 失敗は例外ではなく { ok: false, error } で返す。
  */
@@ -84,6 +91,7 @@ function isStorableAmount(amountYen: number): boolean {
  */
 export async function listExpenses(
   client: PrismaClient,
+  userId: UserId,
   filter: ExpenseListFilter,
 ): Promise<ExpenseResult<ExpenseWithRelations[]>> {
   if (!isYearMonth(filter.yearMonth)) {
@@ -97,6 +105,7 @@ export async function listExpenses(
 
   const expenses = await client.expense.findMany({
     where: {
+      userId,
       date: { gte: range.gte, lt: range.lt },
       ...(filter.categoryId ? { categoryId: filter.categoryId } : {}),
       ...(filter.paymentSourceId ? { paymentSourceId: filter.paymentSourceId } : {}),
@@ -112,13 +121,14 @@ export async function listExpenses(
   return { ok: true, value: expenses };
 }
 
-/** 1件取得（編集画面用）。存在しなければ null */
+/** 1件取得（編集画面用）。存在しない・他人の支出なら null */
 export async function getExpense(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<ExpenseWithRelations | null> {
-  return client.expense.findUnique({
-    where: { id },
+  return client.expense.findFirst({
+    where: { id, userId },
     include: { category: true, paymentSource: true },
   });
 }
@@ -141,7 +151,11 @@ function checkInput(input: ExpenseInput): string | null {
   return null;
 }
 
-/** Prisma へ渡すデータへ直す。date は @db.Date 用に UTC 深夜へ変換する */
+/**
+ * Prisma へ渡すデータへ直す。date は @db.Date 用に UTC 深夜へ変換する。
+ * 項目を1つずつ拾う（入力オブジェクトをスプレッドしない。userId が紛れ込む余地を作らないため）。
+ * userId はここでは入れない（更新の data に userId を入れないため。作成時に呼び出し側で足す）。
+ */
 function toExpenseData(input: ExpenseInput) {
   return {
     date: toDbDate(input.date),
@@ -154,7 +168,34 @@ function toExpenseData(input: ExpenseInput) {
   };
 }
 
-/** 参照先が見つからないエラーを利用者向けの文言に直す */
+/**
+ * 選択されたカテゴリ・払い出し先が、その利用者のものかを確認する。
+ * 見つからなければ（他人のものも含む）それぞれの notFound の文言、両方あれば null。
+ */
+async function checkRelationOwnership(
+  client: PrismaClient,
+  userId: UserId,
+  input: ExpenseInput,
+): Promise<string | null> {
+  const [category, paymentSource] = await Promise.all([
+    client.category.findFirst({
+      where: { id: input.categoryId, userId },
+      select: { id: true },
+    }),
+    client.paymentSource.findFirst({
+      where: { id: input.paymentSourceId, userId },
+      select: { id: true },
+    }),
+  ]);
+  if (!category) return EXPENSE_ERRORS.categoryNotFound;
+  if (!paymentSource) return EXPENSE_ERRORS.paymentSourceNotFound;
+  return null;
+}
+
+/**
+ * 参照先が見つからないエラーを利用者向けの文言に直す。
+ * 持ち主の確認（checkRelationOwnership）のあとで参照先が消えた場合のフォールバック。
+ */
 function toRelationError(error: unknown): string | null {
   const code = getPrismaErrorCode(error);
   if (code === "P2003" || code === "P2039" || code === "P2025") {
@@ -165,9 +206,10 @@ function toRelationError(error: unknown): string | null {
   return null;
 }
 
-/** 登録する */
+/** その利用者の支出として登録する。userId は引数から設定する */
 export async function createExpense(
   client: PrismaClient,
+  userId: UserId,
   input: ExpenseInput,
 ): Promise<ExpenseResult<Expense>> {
   const invalid = checkInput(input);
@@ -180,8 +222,11 @@ export async function createExpense(
     return { ok: false, error: EXPENSE_ERRORS.invalidDate };
   }
 
+  const ownershipError = await checkRelationOwnership(client, userId, input);
+  if (ownershipError) return { ok: false, error: ownershipError };
+
   try {
-    const created = await client.expense.create({ data });
+    const created = await client.expense.create({ data: { ...data, userId } });
     return { ok: true, value: created };
   } catch (error) {
     const relationError = toRelationError(error);
@@ -190,9 +235,10 @@ export async function createExpense(
   }
 }
 
-/** 更新する。存在しなければ notFound */
+/** 更新する。存在しない・他人の支出なら notFound。userId は更新しない */
 export async function updateExpense(
   client: PrismaClient,
+  userId: UserId,
   id: string,
   input: ExpenseInput,
 ): Promise<ExpenseResult<Expense>> {
@@ -206,8 +252,11 @@ export async function updateExpense(
     return { ok: false, error: EXPENSE_ERRORS.invalidDate };
   }
 
+  const ownershipError = await checkRelationOwnership(client, userId, input);
+  if (ownershipError) return { ok: false, error: ownershipError };
+
   try {
-    const updated = await client.expense.update({ where: { id }, data });
+    const updated = await client.expense.update({ where: { id, userId }, data });
     return { ok: true, value: updated };
   } catch (error) {
     if (getPrismaErrorCode(error) === "P2025") {
@@ -226,10 +275,11 @@ export async function updateExpense(
  */
 export async function deleteExpense(
   client: PrismaClient,
+  userId: UserId,
   id: string,
 ): Promise<ExpenseResult<null>> {
   try {
-    await client.expense.delete({ where: { id } });
+    await client.expense.delete({ where: { id, userId } });
     return { ok: true, value: null };
   } catch (error) {
     if (getPrismaErrorCode(error) === "P2025") {
@@ -257,6 +307,7 @@ export type QuickPickOptions = {
  */
 export async function listQuickPickCategoryIds(
   client: PrismaClient,
+  userId: UserId,
   orderedCategoryIds: readonly string[],
   now: Date,
   options: QuickPickOptions = {},
@@ -271,7 +322,7 @@ export async function listQuickPickCategoryIds(
   const lt = toDbDate(addDaysToDate(today, 1));
 
   const rows = await client.expense.findMany({
-    where: { date: { gte, lt } },
+    where: { userId, date: { gte, lt } },
     select: { categoryId: true },
   });
 
@@ -292,9 +343,11 @@ export type RecentStoreNameOptions = {
 /**
  * 直近の店名を、重複を除いて新しい順に返す。
  * 入力欄の datalist に出して2回目以降の入力を短くするためのもの。
+ * **その利用者の支出だけから拾う**（他人の店名をサジェストに出さない）。
  */
 export async function listRecentStoreNames(
   client: PrismaClient,
+  userId: UserId,
   options: RecentStoreNameOptions = {},
 ): Promise<string[]> {
   const limit = options.limit ?? RECENT_STORE_NAME_LIMIT;
@@ -302,7 +355,7 @@ export async function listRecentStoreNames(
   if (limit <= 0 || scanLimit <= 0) return [];
 
   const rows = await client.expense.findMany({
-    where: { storeName: { not: null } },
+    where: { userId, storeName: { not: null } },
     select: { storeName: true },
     orderBy: [{ date: "desc" }, { createdAt: "desc" }],
     take: scanLimit,

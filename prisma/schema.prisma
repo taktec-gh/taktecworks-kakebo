@@ -1,9 +1,15 @@
 // Prisma schema
 // 参照: https://pris.ly/d/prisma-schema
 //
-// 仕様の出典: docs/features.md / docs/steps/step-2.md
+// 仕様の出典: docs/features.md / docs/steps/step-2.md / docs/steps/pub-1.md
 //
 // 共通規約
+// - 全データモデルに userId（User への参照、onDelete: Cascade）を持たせる。
+//   例外は LoginAttempt のみ（ログイン前＝誰か分からない時点の IP 単位の記録のため）。
+//   Budget / CategoryBudget も払い出し先・カテゴリ経由で持ち主が決まるが、直接 userId を持たせる
+//   （「全クエリの where に userId がある」という単純な規則にするため）
+// - 関連の持ち主は複合外部キー（[関連ID, userId] → 参照先の [id, userId]）で DB に強制する。
+//   他人のカテゴリ・払い出し先を参照する行は外部キー違反で拒否される
 // - 金額はすべて整数円（Int）。小数は使わない
 // - 年月は String の "YYYY-MM" 形式（@db.VarChar(7)）。辞書順ソートが暦順と一致する。
 //   char(7) は末尾を空白で埋めてしまい（"2026-8" → "2026-8 "）JS 側の === 比較が
@@ -45,19 +51,39 @@ enum CostType {
   VARIABLE
 }
 
+/// 利用者。最小限の項目だけを持つ（表示名・メールアドレス等は持たない。docs/steps/pub-1.md 設計判断 2）。
+/// 削除すると全データがカスケード削除される。
+model User {
+  id String @id @default(cuid())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  paymentSources  PaymentSource[]
+  categories      Category[]
+  expenses        Expense[]
+  budgets         Budget[]
+  categoryBudgets CategoryBudget[]
+  incomes         Income[]
+  credentials     Credential[]
+}
+
 /// 払い出し先。支出を「どこから出したか」で管理する軸であり、月次予算の主軸。
 model PaymentSource {
   id   String            @id @default(cuid())
-  /// 表示名。例「現金」「Aカード」「A銀行 引き落とし」
-  name String            @unique
+  /// 表示名。例「現金」「Aカード」「A銀行 引き落とし」。ユーザー内で一意
+  name String
   type PaymentSourceType
 
   /// 並べ替え用
   sortOrder Int
   /// 使わなくなったカードの無効化（削除ではない）
   isActive  Boolean @default(true)
-  /// 入力時の既定の払い出し先。全体で1件のみ true（下の部分ユニークインデックスで強制）
+  /// 入力時の既定の払い出し先。ユーザーごとに1件のみ true（下の部分ユニークインデックスで強制）
   isDefault Boolean @default(false)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -65,25 +91,36 @@ model PaymentSource {
   expenses Expense[]
   budgets  Budget[]
 
-  /// isDefault = true の行は全体で最大1件しか存在できない
-  @@unique([isDefault], where: { isDefault: true })
+  /// 複合外部キー（Expense / Budget → [id, userId]）の参照先
+  @@unique([id, userId])
+  @@unique([userId, name])
+  /// isDefault = true の行はユーザーごとに最大1件しか存在できない
+  @@unique([userId, isDefault], where: { isDefault: true })
 }
 
 /// 支出カテゴリ。
 model Category {
   id       String   @id @default(cuid())
-  name     String   @unique
+  /// ユーザー内で一意
+  name     String
   costType CostType
 
   sortOrder Int
   /// 非表示（削除ではない）
   isHidden  Boolean @default(false)
 
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   expenses Expense[]
   budgets  CategoryBudget[]
+
+  /// 複合外部キー（Expense / CategoryBudget → [id, userId]）の参照先
+  @@unique([id, userId])
+  @@unique([userId, name])
 }
 
 /// 支出。date は「支出発生日」。
@@ -96,11 +133,16 @@ model Expense {
   date      DateTime @db.Date
   amountYen Int
 
-  categoryId String
-  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  /// 複合外部キー。同じ userId のカテゴリしか参照できない
+  categoryId String
+  category   Category @relation(fields: [categoryId, userId], references: [id, userId], onDelete: Restrict)
+
+  /// 複合外部キー。同じ userId の払い出し先しか参照できない
   paymentSourceId String
-  paymentSource   PaymentSource @relation(fields: [paymentSourceId], references: [id], onDelete: Restrict)
+  paymentSource   PaymentSource @relation(fields: [paymentSourceId, userId], references: [id, userId], onDelete: Restrict)
 
   /// 店名。直近使った店名のサジェストに使う
   storeName String?
@@ -111,17 +153,21 @@ model Expense {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([date])
-  @@index([date, categoryId])
-  @@index([date, paymentSourceId])
+  @@index([userId, date])
+  @@index([userId, date, categoryId])
+  @@index([userId, date, paymentSourceId])
 }
 
 /// 払い出し先の月次予算（＝予算の主軸。合計が今月の総予算）。
 model Budget {
   id String @id @default(cuid())
 
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 複合外部キー。同じ userId の払い出し先しか参照できない
   paymentSourceId String
-  paymentSource   PaymentSource @relation(fields: [paymentSourceId], references: [id], onDelete: Cascade)
+  paymentSource   PaymentSource @relation(fields: [paymentSourceId, userId], references: [id, userId], onDelete: Cascade)
 
   /// "YYYY-MM"
   yearMonth String @db.VarChar(7)
@@ -130,16 +176,21 @@ model Budget {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// 払い出し先が持ち主を決めるので userId は含めない（操作の where には userId を足す）
   @@unique([paymentSourceId, yearMonth])
-  @@index([yearMonth])
+  @@index([userId, yearMonth])
 }
 
 /// カテゴリの月次予算（＝任意の補助上限。未設定でも全機能が成立する）。
 model CategoryBudget {
   id String @id @default(cuid())
 
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 複合外部キー。同じ userId のカテゴリしか参照できない
   categoryId String
-  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId, userId], references: [id, userId], onDelete: Cascade)
 
   /// "YYYY-MM"
   yearMonth String @db.VarChar(7)
@@ -148,8 +199,9 @@ model CategoryBudget {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// カテゴリが持ち主を決めるので userId は含めない（操作の where には userId を足す）
   @@unique([categoryId, yearMonth])
-  @@index([yearMonth])
+  @@index([userId, yearMonth])
 }
 
 /// 収入。「今月使える原資」としてのみ扱い、収支管理はしない。
@@ -163,18 +215,25 @@ model Income {
   /// 「給与」「賞与」など
   label     String?
 
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([yearMonth])
+  @@index([userId, yearMonth])
 }
 
-/// パスキー（WebAuthn）の資格情報。利用者は1人なのでユーザーへの参照は持たない。
-/// 1件以上あるとパスワード単独でのログインを拒否する（docs/steps/step-7.md「設計判断 1」）。
+/// パスキー（WebAuthn）の資格情報。持ち主（userId）を持つ。
+/// ログインは認証器が返した credentialId で引き、その持ち主のセッションを発行する。
 model Credential {
   id String @id @default(cuid())
 
-  /// 認証器が発行した資格情報ID。base64url 文字列として保存する
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 認証器が発行した資格情報ID。base64url 文字列として保存する。
+  /// 全体で一意（ログイン時は持ち主が分からない状態で引くため、userId を含めない）
   credentialId String @unique
   /// 公開鍵（COSE 形式のバイト列）
   publicKey    Bytes
@@ -188,9 +247,13 @@ model Credential {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
   lastUsedAt DateTime?
+
+  @@index([userId])
 }
 
 /// ログイン試行の記録。レート制限と、攻撃に気づくために残す。
+///
+/// **userId を持たない唯一のデータモデル。** ログイン前（誰か分からない時点）の IP 単位の記録のため。
 ///
 /// 冒頭の共通規約「全モデルに createdAt / updatedAt」の唯一の例外で updatedAt を持たない。
 /// 追記しかせず、書き込んだ行を更新することがないため

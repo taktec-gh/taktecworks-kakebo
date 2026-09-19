@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: kakebo
+      POSTGRES_PASSWORD: kakebo_dev   # ローカル専用。本番とは無関係
+      POSTGRES_DB: kakebo_dev
+    ports:
+      - "127.0.0.1:5433:5432"         # 自分のPCからだけ接続できるようにする
+    volumes:
+      - kakebo-db:/var/lib/postgresql/data
+
+volumes:
+  kakebo-db:

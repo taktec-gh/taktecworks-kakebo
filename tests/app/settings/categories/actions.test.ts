@@ -16,7 +16,10 @@ import { CostType, type Category } from "@/generated/prisma/client";
 import { CATEGORY_ORDER_ERRORS } from "@/lib/category-order";
 import { CATEGORY_VALIDATION_ERRORS } from "@/lib/category-validation";
 import { CATEGORY_ERRORS } from "@/lib/categories";
+import type { UserId } from "@/lib/user-id";
 import { CATEGORIES_PATH, categoryDetailPath } from "@/app/settings/categories/action-state";
+
+const USER_ID = "user_1" as UserId;
 
 class RedirectError extends Error {
   digest: string;
@@ -30,7 +33,7 @@ const redirect = vi.fn((url: string): never => {
   throw new RedirectError(url);
 });
 const revalidatePath = vi.fn();
-const getSession = vi.fn<() => Promise<{ sub: string; iat: number; exp: number } | null>>();
+const requireUserId = vi.fn<() => Promise<UserId>>();
 
 const createCategory = vi.fn();
 const updateCategory = vi.fn();
@@ -40,7 +43,7 @@ const deleteCategory = vi.fn();
 
 vi.mock("next/navigation", () => ({ redirect: (url: string) => redirect(url) }));
 vi.mock("next/cache", () => ({ revalidatePath: (path: string) => revalidatePath(path) }));
-vi.mock("@/lib/session", () => ({ getSession: () => getSession() }));
+vi.mock("@/lib/session", () => ({ requireUserId: () => requireUserId() }));
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/categories", async () => {
   const actual = await vi.importActual<typeof import("@/lib/categories")>("@/lib/categories");
@@ -63,11 +66,10 @@ const {
 } = await import("@/app/settings/categories/actions");
 const { initialCategoryActionState } = await import("@/app/settings/categories/action-state");
 
-const SESSION = { sub: "owner", iat: 0, exp: 9_999_999_999 };
-
 function makeCategory(overrides: Partial<Category> = {}): Category {
   return {
     id: "cat_1",
+    userId: USER_ID,
     name: "食費",
     costType: CostType.VARIABLE,
     sortOrder: 1,
@@ -89,8 +91,8 @@ function formDataOf(entries: Record<string, string>): FormData {
 beforeEach(() => {
   redirect.mockClear();
   revalidatePath.mockClear();
-  getSession.mockReset();
-  getSession.mockResolvedValue(SESSION);
+  requireUserId.mockReset();
+  requireUserId.mockResolvedValue(USER_ID);
   createCategory.mockReset();
   updateCategory.mockReset();
   setCategoryHidden.mockReset();
@@ -101,6 +103,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+/** requireUserId() が未ログインのときの実際の挙動（redirect(LOGIN_PATH) を呼んで例外を投げる）を再現する */
+function mockUnauthenticated(): void {
+  requireUserId.mockImplementation(() => {
+    redirect("/login");
+    throw new Error("unreachable");
+  });
+}
 
 describe("認証なしアクセスの拒否", () => {
   const cases: Array<[string, () => Promise<unknown>, ReturnType<typeof vi.fn>]> = [
@@ -150,7 +160,7 @@ describe("認証なしアクセスの拒否", () => {
   it.each(cases)(
     "%s はセッションが無ければ /login へ redirect し、データ層を呼ばない",
     async (_label, run, dataFn) => {
-      getSession.mockResolvedValue(null);
+      mockUnauthenticated();
       await expect(run()).rejects.toThrow("NEXT_REDIRECT");
       expect(redirect).toHaveBeenCalledWith("/login");
       expect(dataFn).not.toHaveBeenCalled();
@@ -185,7 +195,7 @@ describe("createCategoryAction", () => {
       formDataOf({ name: "  保険  ", costType: CostType.FIXED }),
     );
 
-    expect(createCategory).toHaveBeenCalledWith(expect.anything(), {
+    expect(createCategory).toHaveBeenCalledWith(expect.anything(), USER_ID, {
       name: "保険",
       costType: CostType.FIXED,
     });
@@ -224,7 +234,7 @@ describe("updateCategoryAction", () => {
       formDataOf({ id: "cat_1", name: "外食", costType: CostType.VARIABLE }),
     );
 
-    expect(updateCategory).toHaveBeenCalledWith(expect.anything(), {
+    expect(updateCategory).toHaveBeenCalledWith(expect.anything(), USER_ID, {
       id: "cat_1",
       name: "外食",
       costType: CostType.VARIABLE,
@@ -265,7 +275,7 @@ describe("setCategoryHiddenAction", () => {
       formDataOf({ id: "cat_1", isHidden: "true" }),
     );
 
-    expect(setCategoryHidden).toHaveBeenCalledWith(expect.anything(), "cat_1", true);
+    expect(setCategoryHidden).toHaveBeenCalledWith(expect.anything(), USER_ID, "cat_1", true);
   });
 
   it.each(["false", "", "TRUE", "1"])(
@@ -278,7 +288,7 @@ describe("setCategoryHiddenAction", () => {
         formDataOf({ id: "cat_1", isHidden: value }),
       );
 
-      expect(setCategoryHidden).toHaveBeenCalledWith(expect.anything(), "cat_1", false);
+      expect(setCategoryHidden).toHaveBeenCalledWith(expect.anything(), USER_ID, "cat_1", false);
     },
   );
 
@@ -287,7 +297,7 @@ describe("setCategoryHiddenAction", () => {
 
     await setCategoryHiddenAction(initialCategoryActionState, formDataOf({ id: "cat_1" }));
 
-    expect(setCategoryHidden).toHaveBeenCalledWith(expect.anything(), "cat_1", false);
+    expect(setCategoryHidden).toHaveBeenCalledWith(expect.anything(), USER_ID, "cat_1", false);
   });
 
   it("成功時は一覧と編集ページを revalidate する", async () => {
@@ -342,7 +352,7 @@ describe("moveCategoryAction", () => {
       formDataOf({ id: "cat_1", direction: "down" }),
     );
 
-    expect(moveCategory).toHaveBeenCalledWith(expect.anything(), "cat_1", "down");
+    expect(moveCategory).toHaveBeenCalledWith(expect.anything(), USER_ID, "cat_1", "down");
     expect(revalidatePath).toHaveBeenCalledWith(CATEGORIES_PATH);
     expect(revalidatePath).toHaveBeenCalledWith(categoryDetailPath("cat_1"));
     expect(result).toEqual({ error: null });

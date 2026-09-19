@@ -10,6 +10,7 @@ import { listRecentStoreNames } from "@/lib/expenses";
 import { getExpense } from "@/lib/expenses";
 import { listPaymentSources } from "@/lib/payment-sources";
 import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/session";
 
 import { EXPENSES_PATH } from "../action-state";
 import { deleteExpenseAction, updateExpenseAction } from "../actions";
@@ -33,15 +34,17 @@ export default async function ExpenseEditPage({
   params: Promise<{ id: string }>;
 }) {
   await connection();
+  // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
+  const userId = await requireUserId();
 
   const { id } = await params;
-  const expense = await getExpense(prisma, id);
+  const expense = await getExpense(prisma, userId, id);
   if (!expense) notFound();
 
   const [categories, paymentSources, storeNameSuggestions] = await Promise.all([
-    listCategories(prisma),
-    listPaymentSources(prisma),
-    listRecentStoreNames(prisma),
+    listCategories(prisma, userId),
+    listPaymentSources(prisma, userId),
+    listRecentStoreNames(prisma, userId),
   ]);
 
   const selectableCategories = categories.filter(

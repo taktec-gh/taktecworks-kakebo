@@ -3,16 +3,20 @@ import {
   PaymentSourceType,
   type Category,
   type PaymentSource,
-  type PrismaClient,
+  type Prisma,
 } from "@/generated/prisma/client";
 
+import type { UserId } from "@/lib/user-id";
+
 /**
- * 初期データ（プリセット）の定義と投入処理。
+ * 初期データ（プリセット）の定義と、利用者ごとの投入処理。
  *
- * CLI から実行する入口は prisma/seed.ts。ここには DB 接続を持たず、
- * 呼び出し側から PrismaClient を受け取る（テストから差し替えられるようにするため）。
+ * 公開版では全体に対して投入するものは無く、ユーザーを作るとき
+ * （src/lib/users.ts の createUserWithPresets）にその利用者へ投入する。
+ * そのため CLI の入口（prisma/seed.ts）は持たない（docs/steps/pub-1.md 設計判断 8）。
+ * ここには DB 接続を持たず、呼び出し側からクライアントを受け取る。
  *
- * 投入は upsert で行い、何度実行しても結果が変わらない（冪等）。
+ * 投入は (userId, name) をキーにした upsert で行い、何度実行しても結果が変わらない（冪等）。
  * すでに存在するレコードは更新しない。利用者が並べ替え・非表示・既定値を
  * 変更したあとに再実行しても、その変更を巻き戻さないため。
  */
@@ -66,18 +70,24 @@ export type SeedResult = {
 };
 
 /**
- * プリセットを投入する。冪等。
+ * その利用者にプリセットを投入する。冪等。
  *
- * @param client 使用する PrismaClient
+ * @param client 使用するクライアント。PrismaClient でも、トランザクション内の tx でもよい
+ *   （createUserWithPresets はユーザー作成と同じトランザクションで呼ぶ）
+ * @param userId 投入先の利用者
  * @returns 投入後のカテゴリ・払い出し先（プリセット分のみ、定義順）
  */
-export async function seedDatabase(client: PrismaClient): Promise<SeedResult> {
+export async function seedUserPresets(
+  client: Prisma.TransactionClient,
+  userId: UserId,
+): Promise<SeedResult> {
   const categories: Category[] = [];
   for (const preset of PRESET_CATEGORIES) {
     const category = await client.category.upsert({
-      where: { name: preset.name },
+      where: { userId_name: { userId, name: preset.name } },
       update: {},
       create: {
+        userId,
         name: preset.name,
         costType: preset.costType,
         sortOrder: preset.sortOrder,
@@ -89,9 +99,10 @@ export async function seedDatabase(client: PrismaClient): Promise<SeedResult> {
   const paymentSources: PaymentSource[] = [];
   for (const preset of PRESET_PAYMENT_SOURCES) {
     const paymentSource = await client.paymentSource.upsert({
-      where: { name: preset.name },
+      where: { userId_name: { userId, name: preset.name } },
       update: {},
       create: {
+        userId,
         name: preset.name,
         type: preset.type,
         sortOrder: preset.sortOrder,
