@@ -35,6 +35,12 @@ import type { UserId } from "@/lib/user-id";
 const VALID_WEBAUTHN_USER_ID = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
 const OTHER_VALID_WEBAUTHN_USER_ID = "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA";
 
+// リカバリーコードのハッシュの形（isRecoveryCodeHash が要求する /^[0-9a-f]{64}$/）。
+// docs/steps/pub-5.md 設計判断 2・実装完了後の引き継ぎ:
+// 「CreateUserWithPasskeyInput に recoveryCodeHash（必須。形が不正ならトランザクション前に例外）」
+const VALID_RECOVERY_CODE_HASH = "a".repeat(64);
+const INVALID_RECOVERY_CODE_HASH = "not-a-hash";
+
 const seedUserPresets = vi.fn();
 vi.mock("@/lib/seed", () => ({
   seedUserPresets: (...args: unknown[]) => seedUserPresets(...args),
@@ -203,6 +209,7 @@ describe("createUserWithPasskey（サインアップ: 1トランザクション�
       webauthnUserId: VALID_WEBAUTHN_USER_ID,
       credential: credentialInput,
       ipHash: "iphash-1",
+      recoveryCodeHash: VALID_RECOVERY_CODE_HASH,
     });
 
     expect(result).toEqual({ ok: true, userId: "user_1" });
@@ -222,6 +229,7 @@ describe("createUserWithPasskey（サインアップ: 1トランザクション�
       webauthnUserId: VALID_WEBAUTHN_USER_ID,
       credential: credentialInput,
       ipHash: "iphash-1",
+      recoveryCodeHash: VALID_RECOVERY_CODE_HASH,
     });
 
     expect(result).toEqual({ ok: false, reason: "duplicate" });
@@ -239,6 +247,7 @@ describe("createUserWithPasskey（サインアップ: 1トランザクション�
         webauthnUserId: VALID_WEBAUTHN_USER_ID,
         credential: credentialInput,
         ipHash: "iphash-1",
+        recoveryCodeHash: VALID_RECOVERY_CODE_HASH,
       }),
     ).rejects.toThrow("db unavailable");
     expect(recordSignupEvent).not.toHaveBeenCalled();
@@ -254,6 +263,7 @@ describe("createUserWithPasskey（サインアップ: 1トランザクション�
         webauthnUserId: VALID_WEBAUTHN_USER_ID,
         credential: credentialInput,
         ipHash: "iphash-1",
+        recoveryCodeHash: VALID_RECOVERY_CODE_HASH,
       }),
     ).rejects.toThrow("preset failed");
     expect(createCredential).not.toHaveBeenCalled();
@@ -270,12 +280,70 @@ describe("createUserWithPasskey（サインアップ: 1トランザクション�
       webauthnUserId: OTHER_VALID_WEBAUTHN_USER_ID,
       credential: credentialInput,
       ipHash: "iphash-1",
+      recoveryCodeHash: VALID_RECOVERY_CODE_HASH,
     });
 
     expect(userCreate).toHaveBeenCalledWith({
-      data: { webauthnUserId: OTHER_VALID_WEBAUTHN_USER_ID },
+      data: {
+        webauthnUserId: OTHER_VALID_WEBAUTHN_USER_ID,
+        recoveryCodeHash: VALID_RECOVERY_CODE_HASH,
+      },
       select: { id: true },
     });
+  });
+
+  it("recoveryCodeHash がハッシュの形でなければ、トランザクションを始める前に throw し、何も呼ばれない（docs/steps/pub-5.md 設計判断 2「平文はどこにも保存しない」）", async () => {
+    const { client, userCreate, transaction } = createMockClient();
+
+    await expect(
+      createUserWithPasskey(client, {
+        webauthnUserId: VALID_WEBAUTHN_USER_ID,
+        credential: credentialInput,
+        ipHash: "iphash-1",
+        recoveryCodeHash: INVALID_RECOVERY_CODE_HASH,
+      }),
+    ).rejects.toThrow("invalid recovery code hash");
+
+    expect(transaction).not.toHaveBeenCalled();
+    expect(userCreate).not.toHaveBeenCalled();
+    expect(seedUserPresets).not.toHaveBeenCalled();
+    expect(createCredential).not.toHaveBeenCalled();
+    expect(recordSignupEvent).not.toHaveBeenCalled();
+  });
+
+  it("recoveryCodeHash が空文字なら throw する（未発行のまま保存しない）", async () => {
+    await expect(
+      createUserWithPasskey(client(), {
+        webauthnUserId: VALID_WEBAUTHN_USER_ID,
+        credential: credentialInput,
+        ipHash: "iphash-1",
+        recoveryCodeHash: "",
+      }),
+    ).rejects.toThrow("invalid recovery code hash");
+
+    function client() {
+      return createMockClient().client;
+    }
+  });
+
+  it("User の作成データに recoveryCodeHash（渡したハッシュそのまま）が含まれる", async () => {
+    const { client, userCreate } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_1" });
+    seedUserPresets.mockResolvedValue({ categories: [], paymentSources: [] });
+    createCredential.mockResolvedValue({ ok: true, value: {} });
+
+    await createUserWithPasskey(client, {
+      webauthnUserId: VALID_WEBAUTHN_USER_ID,
+      credential: credentialInput,
+      ipHash: "iphash-1",
+      recoveryCodeHash: VALID_RECOVERY_CODE_HASH,
+    });
+
+    expect(userCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ recoveryCodeHash: VALID_RECOVERY_CODE_HASH }),
+      }),
+    );
   });
 });
 

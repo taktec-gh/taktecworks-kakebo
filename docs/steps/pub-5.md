@@ -193,6 +193,31 @@ Step 2 で「独立した Step に分け、削れる形にしておく」とし�
 | 12 | `finishRecoveryPasskeyRegistrationAction` の成功時にリカバリー用トークンを消さない | 落ちる |
 | 13 | リカバリー用トークンの有効期限を30日にする | 落ちる |
 
+### 変異テストの結果（2026-09-19）
+
+**13件すべて検出。** 変異は文字列置換で1件ずつ入れ、`git diff` で入ったことを確認してから全テスト（3159件）を流し、戻した（最後に `src/` / `prisma/` の未コミット変更が無いことを確認）。
+
+| # | 落ちた件数 | 検出したテスト |
+|---|---|---|
+| 1 | 6 | `proxy.test.ts`「リカバリー用トークンをセッション Cookie 名に入れてもリダイレクトする」、`auth.test.ts`（typ）、`session.test.ts`（requireUserId） |
+| 2 | 24 | `recovery/actions.test.ts`（照合の正常系・start など）。**注: モックの prisma に `user.updateMany` が無く、変異が例外になって失敗の分岐に落ちたことで検出している**（下記） |
+| 3 | 2 | `recovery-codes.test.ts`（差し替えの where）、`data-isolation.test.ts`（A の userId で B のハッシュを指定しても差し替わらない） |
+| 4 | 1 | `recovery-codes.test.ts`「updateMany → createCredential の順で同じトランザクション内に呼ばれ…」 |
+| 5 | 1 | `signup/actions.test.ts`「recoveryCode は createUserWithPasskey に渡した recoveryCodeHash のハッシュ元」 |
+| 6 | 5 | `recovery-code.test.ts`（正規化・ハッシュ）、`recovery/actions.test.ts`（小文字を含む入力） |
+| 7 | 1 | `recovery-codes.test.ts`「where は { recoveryCodeHash, demoExpiresAt: null }」 |
+| 8 | 3 | `recovery/actions.test.ts`（見つからない・不正文字・例外のそれぞれで失敗を記録） |
+| 9 | 1 | `recovery/actions.test.ts`「codeNotCurrent なら invalidCode を返し、トークンを消す」 |
+| 10 | 5 | `passkey.test.ts`（4用途の sub が異なる、4×4）、`recovery/actions.test.ts`（登録用チャレンジで challengeExpired） |
+| 11 | 2 | `settings/passkeys/actions.test.ts`（デモの拒否） |
+| 12 | 1 | `recovery/actions.test.ts`「clearRecoveryCookie の後に createSession」 |
+| 13 | 6 | `auth.test.ts`（定数・600秒の境界・長い exp も600秒で失効）、`recovery-session.test.ts`（Cookie の maxAge） |
+
+- **#2（照合の時点でコードを消費する）は、たまたま検出されている。** 「照合でコードを変えない」ことを直接見るテストは `completeRecoveryWithPasskey` を呼ばないことだけで、
+  変異のようにアクションが直接 `prisma.user.updateMany` を呼ぶ形は、モックに無いメソッドで例外になって落ちている。
+  **実機確認 5（生体認証を取り消しても同じコードがまだ通る）で振る舞いを確かめる。** 実DBでは検証スクリプト 2c（照合してもハッシュが変わらない）がデータ層の側を確かめている
+- **#4 / #5 / #7 / #9 / #12 は1ケースだけが検出している。** #4 は検証スクリプト 5d（重複で差し替えも戻る）と 6（同時に2回完了）、#7 は 4b が実DBで確かめている
+
 ---
 
 ## 実機確認

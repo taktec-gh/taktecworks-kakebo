@@ -5,10 +5,14 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createRecoveryToken,
+  createSessionToken,
   CRON_CLEANUP_PATH,
+  RECOVERY_COOKIE_NAME,
+  RECOVERY_PASSKEY_PATH,
+  RECOVERY_PATH,
   SESSION_COOKIE_NAME,
   SIGNUP_PATH,
-  createSessionToken,
 } from "@/lib/auth";
 import { config, proxy } from "@/proxy";
 import { CSP_HEADER_NAME, isValidNonce, NONCE_HEADER_NAME } from "@/lib/csp";
@@ -95,6 +99,32 @@ describe("認証不要なパス", () => {
     vi.stubEnv("AUTH_SECRET", "");
     expectPassedThrough(await proxy(requestFor("/login")));
   });
+
+  // docs/steps/pub-5.md 設計判断 5・9・「tester 向けの方針」9
+  it.each([RECOVERY_PATH, RECOVERY_PASSKEY_PATH])(
+    "%s はセッションが無くても通す（/recovery・/recovery/passkey は公開パス）",
+    async (pathname) => {
+      expectPassedThrough(await proxy(requestFor(pathname)));
+    },
+  );
+
+  it("AUTH_SECRET が未設定でも /recovery は開ける", async () => {
+    vi.stubEnv("AUTH_SECRET", "");
+    expectPassedThrough(await proxy(requestFor(RECOVERY_PATH)));
+  });
+});
+
+describe("/recoveryx・/recovery/other は公開でない（接頭辞一致で広げない。tester 向けの方針 9）", () => {
+  // 末尾がスラッシュのパス（例: "/recovery/"）は、NextURL がリダイレクト先の URL 文字列を
+  // 組み立てる際に元のパスの末尾スラッシュを引き継ぐ挙動があり（Next.js 側の既知の挙動。
+  // 本 Step の実装と無関係）、location.pathname の厳密一致比較に向かないためここでは避ける。
+  // 完全一致でしか公開しないこと自体は tests/lib/auth.test.ts の isPublicPath で確認済み
+  it.each(["/recoveryx", "/recovery-admin", "/recovery/other", "/recovery/passkey/extra"])(
+    "%s は Cookie が無ければ /login へリダイレクト",
+    async (pathname) => {
+      expectRedirectedToLogin(await proxy(requestFor(pathname)));
+    },
+  );
 });
 
 describe("未認証で保護対象にアクセスした場合", () => {
@@ -167,6 +197,28 @@ describe("Cookie はあるがセッションが無効な場合", () => {
 
   it("空の Cookie でもリダイレクトする", async () => {
     expectRedirectedToLogin(await proxy(requestFor("/", "")));
+  });
+
+  // docs/steps/pub-5.md 設計判断 5・「tester 向けの方針」1
+  // 「リカバリー用トークンを verifySessionToken に渡すと null」「セッションの Cookie 名に
+  // リカバリー用トークンを入れても proxy は通さない」
+  it("リカバリー用トークンをセッション Cookie 名に入れてもリダイレクトする（typ が違うので家計データに触れない）", async () => {
+    const recoveryToken = await createRecoveryToken(SECRET, {
+      userId: USER_ID,
+      codeHash: "a".repeat(64),
+    });
+    const response = await proxy(requestFor("/", recoveryToken));
+    expectRedirectedToLogin(response);
+    expect(response.headers.get("set-cookie")).toContain(`${SESSION_COOKIE_NAME}=;`);
+  });
+
+  it("リカバリー用トークンは RECOVERY_COOKIE_NAME に置いても（別 Cookie 名なので）proxy には読まれず、保護対象はリダイレクトのまま", async () => {
+    const recoveryToken = await createRecoveryToken(SECRET, {
+      userId: USER_ID,
+      codeHash: "a".repeat(64),
+    });
+    const headers = new Headers({ cookie: `${RECOVERY_COOKIE_NAME}=${recoveryToken}` });
+    expectRedirectedToLogin(await proxy(new NextRequest(`${ORIGIN}/expenses`, { headers })));
   });
 });
 

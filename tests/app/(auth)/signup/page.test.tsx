@@ -30,6 +30,13 @@ vi.mock("next/navigation", () => ({
     throw new Error(`NEXT_REDIRECT;${url}`);
   },
 }));
+// isServerActionRerender（src/lib/server-action-request.ts）が next/headers の headers() を読む。
+// ここでは「Server Action の再描画ではない」（next-action ヘッダが無い）状態を既定にする
+// （docs/steps/pub-5.md「/signup と /recovery/passkey のページは、Server Action の後の
+// 再描画のときだけ redirect しない」）
+vi.mock("next/headers", () => ({
+  headers: async () => new Headers(),
+}));
 // signup/actions.ts はサーバー専用の依存（@simplewebauthn/server, jose 等）を持つため、
 // ページの配線テストでは Server Action そのものをモックし、画面の描画だけを見る
 vi.mock("@/app/(auth)/signup/actions", () => ({
@@ -61,11 +68,15 @@ describe("未ログイン", () => {
     ).toBeInTheDocument();
   });
 
-  it("登録ボタンの前に、端末をなくすとログインできなくなること・別の端末も登録してほしいことを読める", async () => {
+  it("登録ボタンの前に、登録後にリカバリーコードを控えてほしいこと・別の端末も登録すると安心なことを読める（docs/steps/pub-5.md 設計判断 9で趣旨を改めた）", async () => {
+    // 設計判断 9: 「この端末をなくすとログインできなくなる」という Step 2 の文言を、
+    // 「登録の後に表示するリカバリーコードを控えてほしい。別の端末も登録しておくと安心」の趣旨に改める
     getSessionMock.mockResolvedValue(null);
     render(await SignupPage());
-    expect(screen.getByText(/この端末をなくすと、ログインできなくなります/)).toBeInTheDocument();
-    expect(screen.getByText(/別の端末も登録してください/)).toBeInTheDocument();
+    expect(screen.getByText(/リカバリーコード/)).toBeInTheDocument();
+    expect(screen.getByText(/一度だけ表示します/)).toBeInTheDocument();
+    expect(screen.getByText(/必ず控えてください/)).toBeInTheDocument();
+    expect(screen.getByText(/別の端末も登録しておくと安心です/)).toBeInTheDocument();
   });
 
   it("登録ボタンの前に、デモであり実在の家計情報を入力しないでほしいことを読める", async () => {

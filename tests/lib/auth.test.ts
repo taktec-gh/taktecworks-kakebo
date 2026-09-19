@@ -26,14 +26,22 @@ import {
   CRON_CLEANUP_PATH,
   LOGIN_ERROR_MESSAGE,
   LOGIN_PATH,
+  RECOVERY_COOKIE_NAME,
+  RECOVERY_JWT_TYP,
+  RECOVERY_PASSKEY_PATH,
+  RECOVERY_PATH,
+  RECOVERY_TOKEN_MAX_AGE_SECONDS,
   SESSION_COOKIE_NAME,
   SESSION_JWT_ALG,
   SESSION_JWT_TYP,
   SESSION_MAX_AGE_SECONDS,
+  createRecoveryToken,
   createSessionToken,
   getAuthSecret,
+  getRecoveryCookieOptions,
   getSessionCookieOptions,
   isPublicPath,
+  verifyRecoveryToken,
   verifySessionToken,
 } from "@/lib/auth";
 import type { UserId } from "@/lib/user-id";
@@ -408,6 +416,274 @@ describe("verifySessionToken", () => {
   });
 });
 
+// リカバリーコードのハッシュの形（isRecoveryCodeHash が要求する /^[0-9a-f]{64}$/）。
+// 中身の正しさは検証しない（typ・鍵・期限・sub とは独立した関心事）
+const RECOVERY_CODE_HASH = "a".repeat(64);
+const OTHER_RECOVERY_CODE_HASH = "b".repeat(64);
+
+describe("createRecoveryToken / verifyRecoveryToken（docs/steps/pub-5.md 設計判断 5。リカバリー用トークンは通常のセッションとは別物）", () => {
+  it("定数: typ は kakebo-recovery+jwt、Cookie 名は kakeibo_recovery、有効期間は600秒（10分 = 60*10）", () => {
+    expect(RECOVERY_JWT_TYP).toBe("kakebo-recovery+jwt");
+    expect(RECOVERY_COOKIE_NAME).toBe("kakeibo_recovery");
+    expect(RECOVERY_TOKEN_MAX_AGE_SECONDS).toBe(600);
+  });
+
+  it("typ がセッション（kakebo-session+jwt）ともチャレンジ（typ 無し）とも異なる", () => {
+    expect(RECOVERY_JWT_TYP).not.toBe(SESSION_JWT_TYP);
+  });
+
+  it("ドット区切り3セグメントの JWT を返し、ヘッダの typ が RECOVERY_JWT_TYP", async () => {
+    const token = await createRecoveryToken(SECRET, { userId: USER_ID, codeHash: RECOVERY_CODE_HASH }, { now: FIXED_NOW });
+    expect(token.split(".")).toHaveLength(3);
+    expect(decodeHeader(token).typ).toBe(RECOVERY_JWT_TYP);
+    expect(decodeHeader(token).alg).toBe("HS256");
+  });
+
+  it("正しい鍵で発行したトークンを往復でき、userId・codeHash が入る（iat=1768435200, exp=iat+600）", async () => {
+    const token = await createRecoveryToken(
+      SECRET,
+      { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+      { now: FIXED_NOW },
+    );
+    const payload = await verifyRecoveryToken(token, SECRET, { now: FIXED_NOW });
+    // 手計算: 1768435200 + 600 = 1768435800
+    expect(payload).toEqual({
+      userId: USER_ID,
+      codeHash: RECOVERY_CODE_HASH,
+      iat: FIXED_IAT,
+      exp: 1768435800,
+    });
+  });
+
+  it("別のユーザーIDで発行すれば、そのユーザーIDが返る（取り違えない）", async () => {
+    const token = await createRecoveryToken(
+      SECRET,
+      { userId: OTHER_USER_ID, codeHash: RECOVERY_CODE_HASH },
+      { now: FIXED_NOW },
+    );
+    const payload = await verifyRecoveryToken(token, SECRET, { now: FIXED_NOW });
+    expect(payload?.userId).toBe(OTHER_USER_ID);
+    expect(payload?.userId).not.toBe(USER_ID);
+  });
+
+  it("codeHash が異なれば、それぞれ独立して往復する（取り違えない）", async () => {
+    const tokenA = await createRecoveryToken(
+      SECRET,
+      { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+      { now: FIXED_NOW },
+    );
+    const tokenB = await createRecoveryToken(
+      SECRET,
+      { userId: USER_ID, codeHash: OTHER_RECOVERY_CODE_HASH },
+      { now: FIXED_NOW },
+    );
+    await expect(verifyRecoveryToken(tokenA, SECRET, { now: FIXED_NOW })).resolves.toMatchObject({
+      codeHash: RECOVERY_CODE_HASH,
+    });
+    await expect(verifyRecoveryToken(tokenB, SECRET, { now: FIXED_NOW })).resolves.toMatchObject({
+      codeHash: OTHER_RECOVERY_CODE_HASH,
+    });
+  });
+
+  it("userId が空文字なら createRecoveryToken は throw する", async () => {
+    await expect(
+      createRecoveryToken(SECRET, { userId: "", codeHash: RECOVERY_CODE_HASH }),
+    ).rejects.toThrow("user id must be a non-empty string");
+  });
+
+  it("codeHash がハッシュの形でなければ createRecoveryToken は throw する（平文などを載せない）", async () => {
+    await expect(
+      createRecoveryToken(SECRET, { userId: USER_ID, codeHash: "not-a-hash" }),
+    ).rejects.toThrow("invalid recovery code hash");
+    await expect(
+      createRecoveryToken(SECRET, { userId: USER_ID, codeHash: "" }),
+    ).rejects.toThrow("invalid recovery code hash");
+  });
+
+  it("secret が空文字なら createRecoveryToken は throw する", async () => {
+    await expect(
+      createRecoveryToken("", { userId: USER_ID, codeHash: RECOVERY_CODE_HASH }),
+    ).rejects.toThrow("AUTH_SECRET is not set");
+  });
+
+  describe("verifyRecoveryToken の失敗", () => {
+    it("別の鍵で署名されたトークンは null", async () => {
+      const token = await createRecoveryToken(
+        OTHER_SECRET,
+        { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+        { now: FIXED_NOW },
+      );
+      await expect(verifyRecoveryToken(token, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+    });
+
+    it("署名部を1文字改竄すると null", async () => {
+      const token = await createRecoveryToken(
+        SECRET,
+        { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+        { now: FIXED_NOW },
+      );
+      const [header, payload, signature] = token.split(".");
+      const tampered = `${header}.${payload}.${tamperSignature(signature)}`;
+      await expect(verifyRecoveryToken(tampered, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+    });
+
+    it("599秒後はまだ有効、600秒後（10分ちょうど）は失効している", async () => {
+      const token = await createRecoveryToken(
+        SECRET,
+        { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+        { now: FIXED_NOW },
+      );
+      // 手計算: iat=1768435200, exp=1768435800
+      await expect(
+        verifyRecoveryToken(token, SECRET, { now: new Date(1768435799 * 1000) }),
+      ).resolves.not.toBeNull();
+      await expect(
+        verifyRecoveryToken(token, SECRET, { now: new Date(1768435800 * 1000) }),
+      ).resolves.toBeNull();
+    });
+
+    it("maxTokenAge を上書きして長い exp を付けたトークンも、発行から600秒経てば失効する（変異#13対策）", async () => {
+      // jose の maxTokenAge は iat 基準で判定するため、exp を伸ばしても検証側の
+      // RECOVERY_TOKEN_MAX_AGE_SECONDS（固定 600 秒）を超えられないことを確認する
+      const { SignJWT } = await import("jose");
+      const key = new TextEncoder().encode(SECRET);
+      const farFutureExp = FIXED_IAT + 60 * 60 * 24 * 30; // 30日後
+      const token = await new SignJWT({ codeHash: RECOVERY_CODE_HASH })
+        .setProtectedHeader({ alg: "HS256", typ: RECOVERY_JWT_TYP })
+        .setSubject(USER_ID)
+        .setIssuedAt(FIXED_IAT)
+        .setExpirationTime(farFutureExp)
+        .sign(key);
+
+      // 10分未満はまだ通る
+      await expect(
+        verifyRecoveryToken(token, SECRET, { now: new Date((FIXED_IAT + 599) * 1000) }),
+      ).resolves.not.toBeNull();
+      // 10分（600秒）経つと、exp が先でも maxTokenAge で失効する
+      await expect(
+        verifyRecoveryToken(token, SECRET, { now: new Date((FIXED_IAT + 601) * 1000) }),
+      ).resolves.toBeNull();
+    });
+
+    it('typ が RECOVERY_JWT_TYP でなければ null（セッション JWT・チャレンジ JWT との取り違え対策）', async () => {
+      const sessionLikeToken = await createSessionToken(SECRET, USER_ID, { now: FIXED_NOW });
+      await expect(
+        verifyRecoveryToken(sessionLikeToken, SECRET, { now: FIXED_NOW }),
+      ).resolves.toBeNull();
+    });
+
+    it("typ ヘッダが無いトークン（チャレンジ JWT はこの形）は null", async () => {
+      const { SignJWT } = await import("jose");
+      const key = new TextEncoder().encode(SECRET);
+      const token = await new SignJWT({ codeHash: RECOVERY_CODE_HASH })
+        .setProtectedHeader({ alg: "HS256" }) // typ を付けない
+        .setSubject(USER_ID)
+        .setIssuedAt(FIXED_IAT)
+        .setExpirationTime(FIXED_IAT + 600)
+        .sign(key);
+      await expect(verifyRecoveryToken(token, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+    });
+
+    it("codeHash クレームが無い・形が不正なら null", async () => {
+      const { SignJWT } = await import("jose");
+      const key = new TextEncoder().encode(SECRET);
+      const noCodeHash = await new SignJWT({})
+        .setProtectedHeader({ alg: "HS256", typ: RECOVERY_JWT_TYP })
+        .setSubject(USER_ID)
+        .setIssuedAt(FIXED_IAT)
+        .setExpirationTime(FIXED_IAT + 600)
+        .sign(key);
+      await expect(verifyRecoveryToken(noCodeHash, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+
+      const badCodeHash = await new SignJWT({ codeHash: "not-a-hash" })
+        .setProtectedHeader({ alg: "HS256", typ: RECOVERY_JWT_TYP })
+        .setSubject(USER_ID)
+        .setIssuedAt(FIXED_IAT)
+        .setExpirationTime(FIXED_IAT + 600)
+        .sign(key);
+      await expect(verifyRecoveryToken(badCodeHash, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+    });
+
+    it("sub が無い・空文字なら null", async () => {
+      const { SignJWT } = await import("jose");
+      const key = new TextEncoder().encode(SECRET);
+      const noSub = await new SignJWT({ codeHash: RECOVERY_CODE_HASH })
+        .setProtectedHeader({ alg: "HS256", typ: RECOVERY_JWT_TYP })
+        .setIssuedAt(FIXED_IAT)
+        .setExpirationTime(FIXED_IAT + 600)
+        .sign(key);
+      await expect(verifyRecoveryToken(noSub, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+    });
+
+    it.each([
+      ["空文字", ""],
+      ["undefined", undefined],
+      ["null", null],
+      ["JWT ですらない文字列", "not-a-jwt"],
+    ])("不正な token (%s) は throw せず null", async (_label, token) => {
+      await expect(
+        verifyRecoveryToken(token as string | undefined | null, SECRET, { now: FIXED_NOW }),
+      ).resolves.toBeNull();
+    });
+
+    it("secret が空文字のときだけ throw する", async () => {
+      const token = await createRecoveryToken(
+        SECRET,
+        { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+        { now: FIXED_NOW },
+      );
+      await expect(verifyRecoveryToken(token, "")).rejects.toThrow("AUTH_SECRET is not set");
+    });
+  });
+
+  describe("通常のセッションとして使えない（tester 向けの方針 1）", () => {
+    it("リカバリー用トークンを verifySessionToken に渡すと null（typ が違う）", async () => {
+      const token = await createRecoveryToken(
+        SECRET,
+        { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+        { now: FIXED_NOW },
+      );
+      await expect(verifySessionToken(token, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+    });
+
+    it("セッション JWT を verifyRecoveryToken に渡すと null（逆方向も通らない）", async () => {
+      const token = await createSessionToken(SECRET, USER_ID, { now: FIXED_NOW });
+      await expect(verifyRecoveryToken(token, SECRET, { now: FIXED_NOW })).resolves.toBeNull();
+    });
+  });
+});
+
+describe("getRecoveryCookieOptions", () => {
+  it("httpOnly / sameSite lax / path / maxAge=600（RECOVERY_TOKEN_MAX_AGE_SECONDS）が既定", () => {
+    expect(getRecoveryCookieOptions({ isProduction: false })).toEqual({
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false,
+      path: "/",
+      maxAge: RECOVERY_TOKEN_MAX_AGE_SECONDS,
+    });
+  });
+
+  it("本番では secure: true", () => {
+    expect(getRecoveryCookieOptions({ isProduction: true }).secure).toBe(true);
+  });
+
+  it("maxAge は常に10分固定（getSessionCookieOptions と違い、上書きの引数を持たない）", () => {
+    expect(getRecoveryCookieOptions({ isProduction: false }).maxAge).toBe(600);
+    expect(getRecoveryCookieOptions({ isProduction: true }).maxAge).toBe(600);
+  });
+
+  it("Cookie の寿命がリカバリー用トークンの寿命と一致する", async () => {
+    const token = await createRecoveryToken(
+      SECRET,
+      { userId: USER_ID, codeHash: RECOVERY_CODE_HASH },
+      { now: FIXED_NOW },
+    );
+    const payload = decodeSegment(token, 1) as { iat: number; exp: number };
+    expect(getRecoveryCookieOptions().maxAge).toBe(payload.exp - payload.iat);
+  });
+});
+
 describe("getSessionCookieOptions", () => {
   it("isProduction: false なら secure: false", () => {
     expect(getSessionCookieOptions({ isProduction: false }).secure).toBe(false);
@@ -521,6 +797,37 @@ describe("isPublicPath", () => {
     it("大文字小文字を区別する", () => {
       expect(isPublicPath("/SIGNUP")).toBe(false);
       expect(isPublicPath("/Signup")).toBe(false);
+    });
+  });
+
+  describe("/recovery・/recovery/passkey（docs/steps/pub-5.md 設計判断 5・9。完全一致だけで公開する）", () => {
+    it("定数の値", () => {
+      expect(RECOVERY_PATH).toBe("/recovery");
+      expect(RECOVERY_PASSKEY_PATH).toBe("/recovery/passkey");
+    });
+
+    it('"/recovery" と "/recovery/passkey" は公開', () => {
+      expect(isPublicPath("/recovery")).toBe(true);
+      expect(isPublicPath(RECOVERY_PATH)).toBe(true);
+      expect(isPublicPath("/recovery/passkey")).toBe(true);
+      expect(isPublicPath(RECOVERY_PASSKEY_PATH)).toBe(true);
+    });
+
+    it("接頭辞一致で広げない: /recoveryx・/recovery/other・/recovery/ は公開でない", () => {
+      // 「tester 向けの方針」9「/recoveryx・/recovery/other が公開でない」
+      expect(isPublicPath("/recoveryx")).toBe(false);
+      expect(isPublicPath("/recovery-admin")).toBe(false);
+      expect(isPublicPath("/recovery/")).toBe(false);
+      expect(isPublicPath("/recovery/other")).toBe(false);
+      expect(isPublicPath("/recovery/passkeyx")).toBe(false);
+      expect(isPublicPath("/recovery/passkey/")).toBe(false);
+      expect(isPublicPath("/recovery/passkey/extra")).toBe(false);
+    });
+
+    it("大文字小文字を区別する", () => {
+      expect(isPublicPath("/RECOVERY")).toBe(false);
+      expect(isPublicPath("/Recovery")).toBe(false);
+      expect(isPublicPath("/RECOVERY/PASSKEY")).toBe(false);
     });
   });
 

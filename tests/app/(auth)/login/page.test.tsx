@@ -55,6 +55,12 @@ describe("ログインページ", () => {
     render(<LoginPage />);
     expect(screen.getByText(/QR コードを使ってログインに使えます/)).toBeInTheDocument();
   });
+
+  it("「パスキーをなくした場合」→ /recovery のリンクを持つ（docs/steps/pub-5.md 設計判断 9）", () => {
+    render(<LoginPage />);
+    const link = screen.getByRole("link", { name: "パスキーをなくした場合" });
+    expect(link).toHaveAttribute("href", "/recovery");
+  });
 });
 
 describe("デモで試す（docs/steps/pub-3.md 設計判断 9）", () => {

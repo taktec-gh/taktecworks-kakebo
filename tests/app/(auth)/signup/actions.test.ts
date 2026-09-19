@@ -273,9 +273,28 @@ describe("finishSignupAction — 正常系（観点1: ユーザーを作る相�
 
     const result = await finishSignupAction(regResponse, "iPhone");
 
-    expect(result).toEqual({ ok: true });
+    // docs/steps/pub-5.md 設計判断 3「成功の戻り値で平文のコードを返す」。
+    // コード自体はランダムなので値までは固定しないが、ok と型（RecoveryCodeIssuedResult の成功形）は固定する
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(typeof result.recoveryCode).toBe("string");
+      expect(result.recoveryCode.length).toBeGreaterThan(0);
+    }
     expect(createSession).toHaveBeenCalledTimes(1);
     expect(createSession).toHaveBeenCalledWith("user_brand_new");
+  });
+
+  it("成功の戻り値の recoveryCode は、createUserWithPasskey に渡した recoveryCodeHash のハッシュ元（平文）である（docs/steps/pub-5.md 設計判断 3）", async () => {
+    const { hashRecoveryCode } = await import("@/lib/recovery-code");
+    await startAndReadCookie();
+
+    const result = await finishSignupAction(regResponse, "iPhone");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    const passedHash = (createUserWithPasskey.mock.calls[0][1] as { recoveryCodeHash: string })
+      .recoveryCodeHash;
+    expect(hashRecoveryCode(result.recoveryCode)).toBe(passedHash);
   });
 });
 
@@ -289,7 +308,7 @@ describe("finishSignupAction — チャレンジの単回性・取り違え（�
   it("同じチャレンジは2回使えない（成功後は Cookie が消えている）", async () => {
     await startAndReadCookie();
     const first = await finishSignupAction(regResponse, "iPhone");
-    expect(first).toEqual({ ok: true });
+    expect(first.ok).toBe(true);
 
     const second = await finishSignupAction(regResponse, "iPhone");
     expect(second).toEqual({ ok: false, error: SIGNUP_ERRORS.challengeExpired });

@@ -16,6 +16,8 @@ import {
   CHALLENGE_MAX_AGE_SECONDS,
   DEVICE_NAME_MAX_LENGTH,
   PASSKEY_ERRORS,
+  RECOVERY_CHALLENGE_COOKIE_NAME,
+  RECOVERY_CHALLENGE_SUBJECT,
   REGISTER_CHALLENGE_COOKIE_NAME,
   REGISTER_CHALLENGE_SUBJECT,
   SIGNUP_CHALLENGE_COOKIE_NAME,
@@ -56,6 +58,33 @@ describe("getChallengeSubject / getChallengeCookieName", () => {
     expect(getChallengeSubject("authenticate")).toBe("passkey-auth");
     expect(getChallengeCookieName("authenticate")).toBe(AUTH_CHALLENGE_COOKIE_NAME);
     expect(getChallengeCookieName("authenticate")).toBe("kakeibo_passkey_auth");
+  });
+
+  it("recovery の sub は passkey-recovery、Cookie 名は kakeibo_passkey_recovery（docs/steps/pub-5.md 設計判断 5）", () => {
+    expect(getChallengeSubject("recovery")).toBe(RECOVERY_CHALLENGE_SUBJECT);
+    expect(getChallengeSubject("recovery")).toBe("passkey-recovery");
+    expect(getChallengeCookieName("recovery")).toBe(RECOVERY_CHALLENGE_COOKIE_NAME);
+    expect(getChallengeCookieName("recovery")).toBe("kakeibo_passkey_recovery");
+  });
+
+  it("4用途（register・authenticate・recovery・signup）の sub がすべて異なる", () => {
+    const subjects = new Set([
+      REGISTER_CHALLENGE_SUBJECT,
+      AUTH_CHALLENGE_SUBJECT,
+      RECOVERY_CHALLENGE_SUBJECT,
+      SIGNUP_CHALLENGE_SUBJECT,
+    ]);
+    expect(subjects.size).toBe(4);
+  });
+
+  it("4用途の Cookie 名がすべて異なる", () => {
+    const cookieNames = new Set([
+      REGISTER_CHALLENGE_COOKIE_NAME,
+      AUTH_CHALLENGE_COOKIE_NAME,
+      RECOVERY_CHALLENGE_COOKIE_NAME,
+      SIGNUP_CHALLENGE_COOKIE_NAME,
+    ]);
+    expect(cookieNames.size).toBe(4);
   });
 
   // 「セッション JWT の sub とは異なる」という単体の等値比較は、公開版では sub が
@@ -454,10 +483,10 @@ describe("createSignupChallengeToken / verifySignupChallengeToken（docs/steps/p
   });
 });
 
-describe("チャレンジの用途の取り違え: register・authenticate・signup の 3×3（docs/steps/pub-2.md「tester 向けの方針」2）", () => {
+describe("チャレンジの用途の取り違え: register・authenticate・recovery・signup の 4×4（docs/steps/pub-2.md「tester 向けの方針」2、pub-5.md「tester 向けの方針」8）", () => {
   const NOW = new Date("2026-08-14T00:00:00.000Z");
 
-  it("register で発行したトークンは register でのみ通り、authenticate・signup では通らない", async () => {
+  it("register で発行したトークンは register でのみ通り、authenticate・recovery・signup では通らない", async () => {
     const token = await createChallengeToken("CHALLENGE", "register", SECRET, { now: NOW });
 
     await expect(verifyChallengeToken(token, "register", SECRET, { now: NOW })).resolves.toBe(
@@ -466,10 +495,13 @@ describe("チャレンジの用途の取り違え: register・authenticate・sig
     await expect(
       verifyChallengeToken(token, "authenticate", SECRET, { now: NOW }),
     ).resolves.toBeNull();
+    await expect(
+      verifyChallengeToken(token, "recovery", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
     await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toBeNull();
   });
 
-  it("authenticate で発行したトークンは authenticate でのみ通り、register・signup では通らない", async () => {
+  it("authenticate で発行したトークンは authenticate でのみ通り、register・recovery・signup では通らない", async () => {
     const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET, { now: NOW });
 
     await expect(
@@ -478,10 +510,28 @@ describe("チャレンジの用途の取り違え: register・authenticate・sig
     await expect(
       verifyChallengeToken(token, "register", SECRET, { now: NOW }),
     ).resolves.toBeNull();
+    await expect(
+      verifyChallengeToken(token, "recovery", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
     await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toBeNull();
   });
 
-  it("signup で発行したトークンは signup でのみ通り、register・authenticate では通らない", async () => {
+  it("recovery で発行したトークンは recovery でのみ通り、register・authenticate・signup では通らない（変異#10）", async () => {
+    const token = await createChallengeToken("CHALLENGE", "recovery", SECRET, { now: NOW });
+
+    await expect(verifyChallengeToken(token, "recovery", SECRET, { now: NOW })).resolves.toBe(
+      "CHALLENGE",
+    );
+    await expect(
+      verifyChallengeToken(token, "register", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
+    await expect(
+      verifyChallengeToken(token, "authenticate", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
+    await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toBeNull();
+  });
+
+  it("signup で発行したトークンは signup でのみ通り、register・authenticate・recovery では通らない", async () => {
     const token = await createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, SECRET, {
       now: NOW,
     });
@@ -495,6 +545,9 @@ describe("チャレンジの用途の取り違え: register・authenticate・sig
     ).resolves.toBeNull();
     await expect(
       verifyChallengeToken(token, "authenticate", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
+    await expect(
+      verifyChallengeToken(token, "recovery", SECRET, { now: NOW }),
     ).resolves.toBeNull();
   });
 });

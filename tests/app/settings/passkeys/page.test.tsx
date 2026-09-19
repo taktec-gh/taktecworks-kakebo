@@ -47,6 +47,13 @@ vi.mock("@/lib/users", () => ({
   findDemoExpiresAt: () => findDemoExpiresAt(),
 }));
 
+// リカバリーコードが発行済みかどうか（docs/steps/pub-5.md 設計判断 8。ここでは配線だけを見る。
+// hasRecoveryCode 自体の検証は tests/lib/recovery-codes.test.ts）
+const hasRecoveryCode = vi.fn<() => Promise<boolean>>();
+vi.mock("@/lib/recovery-codes", () => ({
+  hasRecoveryCode: () => hasRecoveryCode(),
+}));
+
 const { default: PasskeysPage } = await import("@/app/settings/passkeys/page");
 
 function makeCredential(overrides: Partial<Credential> = {}): Credential {
@@ -73,6 +80,8 @@ beforeEach(() => {
   findWebauthnUserId.mockResolvedValue(WEBAUTHN_USER_ID);
   findDemoExpiresAt.mockReset();
   findDemoExpiresAt.mockResolvedValue(null); // 既定は通常ユーザー
+  hasRecoveryCode.mockReset();
+  hasRecoveryCode.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -138,6 +147,20 @@ describe("デモユーザーへの表示（docs/steps/pub-3.md 設計判断7。�
     expect(
       screen.queryByText(/その端末でログインしてから.*この画面で「この端末を登録」を押してください/),
     ).not.toBeInTheDocument();
+  });
+
+  // docs/steps/pub-5.md 設計判断 8「デモユーザーには出さず」、「tester 向けの方針」10
+  it("デモユーザーにはリカバリーコードの欄を出さない（docs/steps/pub-5.md 設計判断 8）", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+    render(await PasskeysPage());
+    expect(screen.queryByText("リカバリーコード")).not.toBeInTheDocument();
+    // hasRecoveryCode(prisma, userId) 自体は呼ばれてもよいが、判定は isDemo で出し分ける
+  });
+
+  it("通常ユーザーにはリカバリーコードの欄が出る", async () => {
+    findDemoExpiresAt.mockResolvedValue(null);
+    render(await PasskeysPage());
+    expect(screen.getByText("リカバリーコード")).toBeInTheDocument();
   });
 
   it("通常ユーザー（demoExpiresAt が null）にはデモの説明を出さない", async () => {

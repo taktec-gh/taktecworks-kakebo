@@ -14,9 +14,14 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { RECOVERY_CODE_CONFIRM_LABEL } from "@/components/recovery-code-display";
 import { PASSKEY_ERRORS } from "@/lib/passkey-messages";
 import { SIGNUP_ERRORS } from "@/lib/signup-messages";
-import { SIGNUP_UNSUPPORTED_MESSAGE, SignupForm } from "@/app/(auth)/signup/signup-form";
+import {
+  SIGNUP_CONTINUE_LABEL,
+  SIGNUP_UNSUPPORTED_MESSAGE,
+  SignupForm,
+} from "@/app/(auth)/signup/signup-form";
 
 import type {
   PublicKeyCredentialCreationOptionsJSON,
@@ -57,7 +62,7 @@ describe("初期表示", () => {
     render(
       <SignupForm
         start={async () => ({ ok: true, options: OPTIONS })}
-        finish={async () => ({ ok: true })}
+        finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })}
         supportsWebAuthn={() => true}
       />,
     );
@@ -71,7 +76,7 @@ describe("初期表示", () => {
     render(
       <SignupForm
         start={async () => ({ ok: true, options: OPTIONS })}
-        finish={async () => ({ ok: true })}
+        finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })}
         supportsWebAuthn={() => false}
       />,
     );
@@ -83,7 +88,7 @@ describe("初期表示", () => {
     render(
       <SignupForm
         start={async () => ({ ok: true, options: OPTIONS })}
-        finish={async () => ({ ok: true })}
+        finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })}
         supportsWebAuthn={() => true}
       />,
     );
@@ -97,7 +102,7 @@ describe("端末名の空チェック（生体認証を出す前にクライア�
   it("空のまま送信すると deviceNameRequired を出し、start を呼ばない", async () => {
     const start = vi.fn(async () => ({ ok: true as const, options: OPTIONS }));
     render(
-      <SignupForm start={start} finish={async () => ({ ok: true })} supportsWebAuthn={() => true} />,
+      <SignupForm start={start} finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })} supportsWebAuthn={() => true} />,
     );
 
     fireEvent.click(submitButton());
@@ -111,7 +116,7 @@ describe("端末名の空チェック（生体認証を出す前にクライア�
   it("空白のみでも同様に弾く", async () => {
     const start = vi.fn(async () => ({ ok: true as const, options: OPTIONS }));
     render(
-      <SignupForm start={start} finish={async () => ({ ok: true })} supportsWebAuthn={() => true} />,
+      <SignupForm start={start} finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })} supportsWebAuthn={() => true} />,
     );
     fireEvent.change(nameInput(), { target: { value: "   " } });
     fireEvent.click(submitButton());
@@ -124,7 +129,12 @@ describe("端末名の空チェック（生体認証を出す前にクライア�
 });
 
 describe("成功パス", () => {
-  it("start → register → finish → onSuccess の順で呼ばれる", async () => {
+  // docs/steps/pub-5.md 設計判断 3「成功の戻り値で平文のコードを返し、サインアップ画面が
+  // コードの表示に切り替わる。『控えました』の確認（チェックボックスなど）の後に / へ移る」
+  // 引き継ぎ: 「SignupForm の onSuccess は『控えました』の後」。
+  // registerの直後に onSuccess を呼ばないこと・コードの表示を経ること・
+  // 「控えました」にチェックするまで先へ進めないことを、この1本で確かめる。
+  it("start → register → finish の後はコードの表示に切り替わり、『控えました』にチェックして進むまで onSuccess を呼ばない", async () => {
     const order: string[] = [];
     const start = vi.fn(async () => {
       order.push("start");
@@ -136,7 +146,7 @@ describe("成功パス", () => {
     });
     const finish = vi.fn(async (_response, deviceName: string) => {
       order.push(`finish:${deviceName}`);
-      return { ok: true as const };
+      return { ok: true as const, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" };
     });
     const onSuccess = vi.fn(() => order.push("onSuccess"));
 
@@ -153,8 +163,22 @@ describe("成功パス", () => {
     fireEvent.change(nameInput(), { target: { value: "iPhone" } });
     fireEvent.click(submitButton());
 
-    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
+    // finish の直後はコードの表示に切り替わり、まだ onSuccess は呼ばれない
+    const confirmCheckbox = await screen.findByLabelText(RECOVERY_CODE_CONFIRM_LABEL);
+    expect(order).toEqual(["start", "register", "finish:iPhone"]);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(screen.getByTestId("recovery-code")).toHaveTextContent("K7Q2M-9XP4H-TR8WN-B3D6F");
+
+    // 「控えました」の前は進むボタンが disabled
+    const continueButton = screen.getByRole("button", { name: SIGNUP_CONTINUE_LABEL });
+    expect(continueButton).toBeDisabled();
+
+    fireEvent.click(confirmCheckbox);
+    expect(continueButton).toBeEnabled();
+    fireEvent.click(continueButton);
+
     expect(order).toEqual(["start", "register", "finish:iPhone", "onSuccess"]);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
     expect(finish).toHaveBeenCalledWith(RESPONSE, "iPhone");
   });
 
@@ -170,7 +194,7 @@ describe("成功パス", () => {
     render(
       <SignupForm
         start={start}
-        finish={async () => ({ ok: true })}
+        finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })}
         supportsWebAuthn={() => true}
         onSuccess={() => {}}
       />,
@@ -193,7 +217,7 @@ describe("失敗パス（サインアップは理由を出してよい。docs/st
     render(
       <SignupForm
         start={async () => ({ ok: false, error: SIGNUP_ERRORS.rateLimited })}
-        finish={async () => ({ ok: true })}
+        finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })}
         supportsWebAuthn={() => true}
       />,
     );
@@ -226,7 +250,7 @@ describe("失敗パス（サインアップは理由を出してよい。docs/st
     render(
       <SignupForm
         start={async () => ({ ok: true, options: OPTIONS })}
-        finish={async () => ({ ok: true })}
+        finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })}
         register={() => Promise.reject(new Error("NotAllowedError"))}
         supportsWebAuthn={() => true}
       />,
@@ -243,7 +267,7 @@ describe("失敗パス（サインアップは理由を出してよい。docs/st
     render(
       <SignupForm
         start={async () => ({ ok: true, options: OPTIONS })}
-        finish={async () => ({ ok: true })}
+        finish={async () => ({ ok: true, recoveryCode: "K7Q2M-9XP4H-TR8WN-B3D6F" })}
         register={() => Promise.reject(new Error("some internal stack trace detail"))}
         supportsWebAuthn={() => true}
       />,
