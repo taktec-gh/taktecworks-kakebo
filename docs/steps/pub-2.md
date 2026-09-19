@@ -313,3 +313,43 @@ OS に登録されたパスキーは DB から消えても残るので、OS の�
 - ログイン時に user handle と資格情報の持ち主を照合する
 - サインアップは IP 単位（1時間3件）と全体（24時間100件）で制限する。`SignupEvent` は `userId` を持たない
 - アカウントはパスキーで決まる。別の端末で使うときは QR コードでログインしてからパスキーを追加する（新しい端末でのサインアップは別アカウントになる）
+
+---
+
+## 実装完了後の引き継ぎ（tester 向け）
+
+実装はコミット `f2e36f5`。以下は implementer の完了レポートの要約。**シグネチャの正は実装のコード**なので、ずれていたらコードを読むこと。
+
+### モジュール構成
+
+| ファイル | 担当 |
+|---|---|
+| `src/lib/webauthn-user-id.ts` | `generateWebauthnUserId()`（32バイト乱数の base64url、43文字。作る関数はこれ1つ）、`isValidWebauthnUserId`、`webauthnUserIdToBytes`、`getPasskeyDisplayName`（`"家計簿 #XXXX"`。SHA-256 由来で決定的。アルファベットは `PASSKEY_DISPLAY_CODE_ALPHABET`）、`userHandleMatches(userHandle, webauthnUserId)` |
+| `src/lib/passkey.ts` | `createSignupChallengeToken` / `verifySignupChallengeToken`（`sub = "passkey-signup"`、`webauthnUserId` クレーム必須）。**`ChallengePurpose` には入れず専用関数**。`PASSKEY_USER_NAME` は削除 |
+| `src/lib/passkey-session.ts` | `setSignupChallengeCookie` / `consumeSignupChallengeCookie`（Cookie `kakeibo_passkey_signup`。検証の前に消す） |
+| `src/lib/signup-limits.ts` | 定数（1時間3件・24時間100件）、`countRecentSignupsByIp` / `countRecentSignups` / `isSignupLimitReached`（純粋、`>=`）/ `isSignupRateLimited` / `recordSignupEvent(tx, ipHash)` |
+| `src/lib/signup-messages.ts` | `SIGNUP_PATH`、`SIGNUP_COMPLETE_PATH = "/"`、`SIGNUP_ERRORS` |
+| `src/lib/users.ts` | `createUserWithPresets(client, webauthnUserId)`（**シグネチャ変更**）、`createUserWithPasskey(client, { webauthnUserId, credential, ipHash })` → `{ ok: true, userId } \| { ok: false, reason: "duplicate" }`（1トランザクションで User → プリセット → 資格情報 → SignupEvent）、`findWebauthnUserId(client, userId)` |
+| `src/lib/credentials.ts` | `findCredentialByCredentialId` が `include: { user: { select: { webauthnUserId: true } } }` を返す（**戻り値の型変更**）。`createCredential` の第1引数は `Prisma.TransactionClient` |
+| `src/lib/auth.ts` | `PUBLIC_PATHS`（完全一致）に `/signup` |
+| `src/app/(auth)/signup/actions.ts` | `startSignupAction()`、`finishSignupAction(response, deviceName)`。処理順は下記 |
+| `src/app/(auth)/signup/page.tsx` / `signup-form.tsx` | ログイン中は `redirect("/")`。`SignupForm` の props は `start` / `finish` / `register?` / `onSuccess?` / `supportsWebAuthn?` |
+| `src/app/(auth)/login/passkey-actions.ts` | 資格情報を引いた直後、署名検証の前に `userHandleMatches` で照合。不一致は失敗を記録して `LOGIN_ERROR_MESSAGE` |
+| `src/app/settings/passkeys/actions.ts` | `startPasskeyRegistrationAction` が `findWebauthnUserId` の値と表示名を使う。null なら `PASSKEY_ERRORS.accountNotFound` |
+
+`finishSignupAction` の処理順: Cookie を消費（null → `challengeExpired`）→ 端末名の検証 → IP ハッシュとレート制限（→ `rateLimited`）→ `getRpConfig` → `verifyRegistrationResponse`（→ `verificationFailed`）→ `createUserWithPasskey`（Cookie の `webauthnUserId` を使う。重複 → `duplicate`）→ `createSession(戻り値の userId)`。予期しない例外は `unavailable`。
+
+### 仕様から補足・判断した点
+
+- **ログイン中でもサインアップの Server Action は拒否しない**（画面だけリダイレクト）。直接叩くと新しいアカウントが作られてセッションが切り替わる。他人のデータには触れない
+- 端末名の検証より前に Cookie を消費する（成否にかかわらず Cookie を消すため）
+- マイグレーションは `migrate dev --create-only` が一意制約の警告で止まったため、`migrate diff` で SQL を作り、既存行の埋め込みを手で足した。適用後の差分は無い
+- 表示名の4文字は一意ではない（見分けるための名前）
+
+### 実装完了時点のテスト結果
+
+`Tests 16 failed | 1634 passed (1650)`。すべて指示書で「落ちてよい」とした変更による:
+`tests/lib/users.test.ts`（`createUserWithPresets` の引数）、`tests/lib/credentials.test.ts`（`include` が増えた）、
+`tests/app/(auth)/login/passkey-actions.test.ts`（資格情報に `user.webauthnUserId`・応答に `userHandle` が無い）、
+`tests/app/settings/passkeys/actions.test.ts`（モックの prisma に `user` が無い）、`tests/app/data-isolation.test.ts`（表にサインアップの2アクションが無い）。
+`npx tsc --noEmit` のエラーは `tests/lib/users.test.ts` の6件のみ。
