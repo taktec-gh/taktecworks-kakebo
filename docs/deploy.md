@@ -57,7 +57,7 @@
 **単一ユーザー版の Neon プロジェクトを使わない。** 実データが入っている（CLAUDE.md「DB」）。
 
 1. Neon で**新しいプロジェクト**を作る
-   - リージョン: **AWS Asia Pacific (Tokyo)** を選べれば選ぶ（利用者も Vercel の関数も日本に近いほど速い）
+   - リージョン: 日本に近い地域を選ぶ。**2026-09-20 時点で Tokyo は無く、AWS Asia Pacific 1 (Singapore) を選んだ**
    - Postgres のバージョン: 既定でよい（ローカルは 17）
 2. 接続文字列を2つ控える（パスワードマネージャーへ。ここには書かない）
    - **プール接続**（ホスト名に `-pooler` が付く）→ `DATABASE_URL`（アプリ実行時）
@@ -100,7 +100,7 @@ Remove-Item Env:DIRECT_URL, Env:DATABASE_URL
 
    | キー | 値 | 備考 |
    |---|---|---|
-   | `DATABASE_URL` | Neon の**プール接続** | `-pooler` 付き |
+   | `DATABASE_URL` | Neon の**プール接続** | `-pooler` 付き。**`sslmode=require` を `sslmode=verify-full` に書き換える**（下記） |
    | `AUTH_SECRET` | **新しく作ったランダム文字列** | ローカルと別の値。作り方は `.env.example` |
    | `CRON_SECRET` | **新しく作ったランダム文字列** | `AUTH_SECRET` と別の値 |
    | `RP_ID` | `taktecworks-kakebo.vercel.app` | ホスト名だけ。`https://` もスラッシュも付けない |
@@ -110,10 +110,22 @@ Remove-Item Env:DIRECT_URL, Env:DATABASE_URL
    - `DEV_ALLOWED_ORIGINS` は入れない（開発専用）
 6. Deploy
 
+### `sslmode=verify-full` にする理由（2026-09-20）
+
+Neon の接続文字列は `sslmode=require` で終わっている。`pg`（node-postgres）は**今は** `require` を `verify-full`
+（サーバー証明書を検証する）として扱っており、関数のログに「次の大きな更新で本来の弱い意味に変わる」という警告が出る。
+放置すると `pg` v9 で**黙って証明書の検証が外れる**ので、最初から `verify-full` と書いておく。`channel_binding=require` はそのままでよい。
+
 ### 関数のリージョン
 
-Settings → Functions → Function Region を、Neon と同じ地域（**Tokyo, `hnd1`**）にできれば変える。
-DB と関数が離れていると、1回の画面表示で DB を何度も往復するたびに待ち時間が積み上がる。変えたら Redeploy。
+Settings → Functions → Function Region を、Neon と同じ地域（**Singapore, `sin1`**）に変える。
+DB と関数が離れていると、1回の画面表示で DB を何度も往復するたびに待ち時間が積み上がる。**変えたら Redeploy。**
+
+反映は応答の `x-vercel-id` で分かる（`hnd1::sin1` なら、東京の入口からシンガポールの関数へ渡っている）。
+
+```powershell
+curl.exe -sI https://taktecworks-kakebo.vercel.app/login | Select-String x-vercel-id
+```
 
 ---
 
@@ -137,6 +149,22 @@ DB と関数が離れていると、1回の画面表示で DB を何度も往復
 | `taktecworks-kakebo-<ハッシュ>-<team>.vercel.app` | デプロイ固有URL | 同上。ハッシュはデプロイのたびに変わる |
 
 閲覧者に渡すのは本番URLだけにする。
+
+---
+
+## 初回デプロイの記録（2026-09-20）
+
+| 項目 | 結果 |
+|---|---|
+| Neon | プロジェクト `taktecworks-kakebo`、**AWS Asia Pacific 1 (Singapore)**、Free プラン、ブランチ `production`、DB `neondb` |
+| マイグレーション | 7件を手元から `prisma migrate deploy` で適用。`migrate status` で接続先が `neon.tech` であることを確認 |
+| Vercel | プロジェクト名 `taktecworks-kakebo` をそのまま取得。本番URLは希望どおり。関数のリージョンは **Singapore（`sin1`）**（`x-vercel-id` が `hnd1::sin1` で確認） |
+| 環境変数 | 5つ（`DATABASE_URL` / `AUTH_SECRET` / `CRON_SECRET` / `RP_ID` / `RP_ORIGIN`）を Production のみに設定。誤って入れた `DIRECT_URL` と `DEV_ALLOWED_ORIGINS` は削除した |
+| ヘッダー | CSP（nonce はリクエストごとに変わる）・HSTS・`X-Frame-Options: DENY`・`nosniff`・`Referrer-Policy`・`Permissions-Policy`・COOP を確認。`X-Powered-By` は出ない |
+| パス | `/` は未ログインで `/login` へ 307、`/signup` と `/recovery` は 200、`/signupx` は `/login` へ、`/api/cron/cleanup` は合言葉なしで 401 |
+| 画面 | デモ・サインアップ（Windows Hello）・リカバリーコードの表示・支出の登録・再ログインを確認。CSP の違反なし |
+| Cron | Cron Jobs に登録され、手動の Run が 200（ログで確認） |
+| クロスデバイス | **スマホからログインできることを確認**（Step 2 からの持ち越しを解消）。Chrome の「別の方法で保存」→「Windows Hello または外部セキュリティキー」の先に、スマホを選ぶ経路がある |
 
 ---
 
@@ -178,7 +206,7 @@ DB と関数が離れていると、1回の画面表示で DB を何度も往復
 1〜7 がすべて済んでから行う。
 
 - [ ] もう一度 `gitleaks git .` で検出0件
-- [ ] README.md を公開版の説明に書き直した（今は単一ユーザー版の説明のまま）
+- [x] README.md を公開版の説明に書き直した（2026-09-20）
 - [ ] GitHub の Settings → General → Danger Zone → Change visibility → **Public**
 
 ---
