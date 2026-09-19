@@ -51,7 +51,7 @@
 | 状態 | **公開版 Step 5（リカバリーコード）が完了**（2026-09-19）。パスキーを全部なくしても、コードで新しいパスキーを登録して元のアカウントに戻れる |
 | 次 | デプロイ。**スマホのパスキーでのクロスデバイス認証はデプロイ後のプレビュー環境で確認する**（Step 2 から持ち越し） |
 | テスト | 3159件（`npx vitest run`）。すべて成功 |
-| 本番URL | 未公開。Vercelプロジェクト名は `taktecworks-kakebo`（候補）。**最初のデプロイ前に確定し、以後変えない** |
+| 本番URL | 未公開。**Vercel プロジェクト名は `taktecworks-kakebo`（2026-09-19 確定）**、Hobby プラン。**`RP_ID` になるので以後変えない**。手順は [docs/deploy.md](./docs/deploy.md) |
 
 **認証はパスキー（WebAuthn）のみ。** パスワードログイン（`APP_PASSWORD`）と `RECOVERY_MODE` は Step 1 で廃止した。
 アカウントは `/signup` で作る（ユーザー名もメールアドレスも持たない。アカウントはパスキーで決まる）。
@@ -67,7 +67,7 @@
 | [docs/features.md](./docs/features.md) | 機能一覧と仕様。**何を作るかの出典** |
 | [docs/roadmap.md](./docs/roadmap.md) | 単一ユーザー版の Step の順序と根拠、進め方、**踏んだ失敗と規約**（公開版でも有効） |
 | [docs/tech-stack.md](./docs/tech-stack.md) | 技術選定の理由と、**学習データと違う点** |
-| [docs/deploy.md](./docs/deploy.md) | 単一ユーザー版のデプロイ記録（個人情報を除去済み）。公開時に書き直す |
+| [docs/deploy.md](./docs/deploy.md) | **公開版のデプロイと運用の手順**（Vercel Hobby・Neon。環境変数、本番 DB へのマイグレーション、やってはいけない変更） |
 | [docs/steps/pub-N.md](./docs/steps) | **公開版**の各 Step の指示書 |
 | [docs/steps/step-N.md](./docs/steps) | 単一ユーザー版の各 Step の指示書（参考）。step-1.md のみ事後の記録 |
 
