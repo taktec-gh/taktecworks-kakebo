@@ -132,6 +132,50 @@ describe("createSession", () => {
     await expect(createSession(USER_ID)).rejects.toThrow("AUTH_SECRET is not set");
     expect(setSpy).not.toHaveBeenCalled();
   });
+
+  describe("有効期間の指定（デモアカウント。docs/steps/pub-3.md 設計判断 2）", () => {
+    it("maxAgeSeconds を指定すると、JWT の exp と Cookie の maxAge の両方がその値になる", async () => {
+      const now = new Date("2026-08-14T00:00:00.000Z");
+      await createSession(USER_ID, { now, maxAgeSeconds: 3600 });
+
+      const [, token, options] = setSpy.mock.calls[0] as [string, string, Record<string, unknown>];
+      expect(options.maxAge).toBe(3600);
+
+      const payload = await verifySessionToken(token, SECRET, { now });
+      // 手計算: iat = floor(2026-08-14T00:00:00.000Z / 1000)。exp = iat + 3600
+      expect(payload?.exp).toBe((payload?.iat ?? 0) + 3600);
+    });
+
+    it("デモの期限（demoExpiresAt）ちょうどの1秒前は有効、1秒後は無効になる境界を作れる", async () => {
+      const now = new Date("2026-08-14T00:00:00.000Z");
+      // 24時間 = 86,400秒（DEMO_TTL_HOURS 相当）
+      await createSession(USER_ID, { now, maxAgeSeconds: 86_400 });
+      const token = setSpy.mock.calls[0][1] as string;
+
+      const expiresAt = new Date(now.getTime() + 86_400 * 1000);
+      await expect(
+        verifySessionToken(token, SECRET, { now: new Date(expiresAt.getTime() - 1000) }),
+      ).resolves.not.toBeNull();
+      await expect(
+        verifySessionToken(token, SECRET, { now: new Date(expiresAt.getTime() + 1000) }),
+      ).resolves.toBeNull();
+    });
+
+    it("maxAgeSeconds を省略すると、既定の30日のまま（通常ユーザーのセッションは変わらない）", async () => {
+      await createSession(USER_ID);
+      const options = setSpy.mock.calls[0][2] as Record<string, unknown>;
+      expect(options.maxAge).toBe(2592000); // 30日 = SESSION_MAX_AGE_SECONDS
+    });
+
+    it("maxAgeSeconds: 0 を指定すると即座に無効なセッションになる（期限切れのデモを再現できる）", async () => {
+      const now = new Date("2026-08-14T00:00:00.000Z");
+      await createSession(USER_ID, { now, maxAgeSeconds: 0 });
+      const token = setSpy.mock.calls[0][1] as string;
+      await expect(
+        verifySessionToken(token, SECRET, { now: new Date(now.getTime() + 1000) }),
+      ).resolves.toBeNull();
+    });
+  });
 });
 
 describe("getSession", () => {

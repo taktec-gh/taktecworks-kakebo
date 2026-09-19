@@ -50,14 +50,41 @@ vi.mock("@/lib/signup-limits", () => ({
   recordSignupEvent: (...args: unknown[]) => recordSignupEvent(...args),
 }));
 
-const { createUserWithPresets, createUserWithPasskey, findWebauthnUserId } = await import(
-  "@/lib/users"
-);
+// ---- デモアカウント関連のモック（docs/steps/pub-3.md）----
+const buildDemoData = vi.fn();
+const getDemoExpiresAt = vi.fn();
+vi.mock("@/lib/demo-data", () => ({
+  buildDemoData: (...args: unknown[]) => buildDemoData(...args),
+  getDemoExpiresAt: (...args: unknown[]) => getDemoExpiresAt(...args),
+}));
+
+const recordDemoEvent = vi.fn();
+vi.mock("@/lib/demo-limits", () => ({
+  recordDemoEvent: (...args: unknown[]) => recordDemoEvent(...args),
+}));
+
+const insertDemoData = vi.fn();
+vi.mock("@/lib/demo-seed", () => ({
+  insertDemoData: (...args: unknown[]) => insertDemoData(...args),
+}));
+
+const {
+  createUserWithPresets,
+  createUserWithPasskey,
+  createDemoUser,
+  findWebauthnUserId,
+  findDemoExpiresAt,
+  DEMO_USER_TRANSACTION_TIMEOUT_MS,
+} = await import("@/lib/users");
 
 beforeEach(() => {
   seedUserPresets.mockReset();
   createCredential.mockReset();
   recordSignupEvent.mockReset();
+  buildDemoData.mockReset();
+  getDemoExpiresAt.mockReset();
+  recordDemoEvent.mockReset();
+  insertDemoData.mockReset();
 });
 
 function createMockClient() {
@@ -252,6 +279,132 @@ describe("createUserWithPasskey（サインアップ: 1トランザクション�
   });
 });
 
+describe("createDemoUser（デモ: 1トランザクションで User(demoExpiresAt) → プリセット → サンプルデータ → DemoEvent。docs/steps/pub-3.md 設計判断 1・3・8）", () => {
+  const NOW = new Date("2026-08-14T00:00:00.000Z");
+  const EXPIRES_AT = new Date("2026-08-15T00:00:00.000Z");
+  const PLAN = { yearMonths: ["2026-08"], paymentSources: [], budgets: [], categoryBudgets: [], incomes: [], expenses: [] };
+
+  it("成功時: buildDemoData(getCurrentDate(now)) → User作成(demoExpiresAt付き) → insertDemoData → recordDemoEvent の順で1トランザクション内に呼ばれ、{ userId, demoExpiresAt } を返す", async () => {
+    const { client, userCreate, tx, transaction } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_demo_1" });
+    getDemoExpiresAt.mockReturnValue(EXPIRES_AT);
+    buildDemoData.mockReturnValue(PLAN);
+    const presets = { categories: [{ id: "cat_1" }], paymentSources: [{ id: "ps_1" }] };
+    seedUserPresets.mockResolvedValue(presets);
+    const order: string[] = [];
+    seedUserPresets.mockImplementation(async () => {
+      order.push("seedUserPresets");
+      return presets;
+    });
+    insertDemoData.mockImplementation(async () => {
+      order.push("insertDemoData");
+    });
+    recordDemoEvent.mockImplementation(async () => {
+      order.push("recordDemoEvent");
+    });
+
+    const result = await createDemoUser(client, { ipHash: "iphash-1", now: NOW });
+
+    expect(result).toEqual({ userId: "user_demo_1", demoExpiresAt: EXPIRES_AT });
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["seedUserPresets", "insertDemoData", "recordDemoEvent"]);
+    // getCurrentDate(NOW) = JST の日付。2026-08-14T00:00:00Z は JST 2026-08-14 09:00 → "2026-08-14"
+    expect(buildDemoData).toHaveBeenCalledWith("2026-08-14");
+    expect(getDemoExpiresAt).toHaveBeenCalledWith(NOW);
+    expect(insertDemoData).toHaveBeenCalledWith(tx, "user_demo_1", PLAN, presets);
+    expect(recordDemoEvent).toHaveBeenCalledWith(tx, "iphash-1");
+  });
+
+  it("作成する User の data に demoExpiresAt が含まれる（getDemoExpiresAt の戻り値）。通常ユーザーとの違いはここだけ", async () => {
+    const { client, userCreate } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_demo_1" });
+    getDemoExpiresAt.mockReturnValue(EXPIRES_AT);
+    buildDemoData.mockReturnValue(PLAN);
+    seedUserPresets.mockResolvedValue({ categories: [], paymentSources: [] });
+
+    await createDemoUser(client, { ipHash: "iphash-1", now: NOW });
+
+    expect(userCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ demoExpiresAt: EXPIRES_AT }),
+      select: { id: true },
+    });
+  });
+
+  it("webauthnUserId は generateWebauthnUserId が作った値（呼び出しごとに違う値。isValidWebauthnUserId を満たす）", async () => {
+    const { client, userCreate } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_demo_1" });
+    getDemoExpiresAt.mockReturnValue(EXPIRES_AT);
+    buildDemoData.mockReturnValue(PLAN);
+    seedUserPresets.mockResolvedValue({ categories: [], paymentSources: [] });
+
+    await createDemoUser(client, { ipHash: "iphash-1", now: NOW });
+    const firstCallData = userCreate.mock.calls[0][0].data as { webauthnUserId: string };
+
+    userCreate.mockClear();
+    await createDemoUser(client, { ipHash: "iphash-2", now: NOW });
+    const secondCallData = userCreate.mock.calls[0][0].data as { webauthnUserId: string };
+
+    expect(firstCallData.webauthnUserId.length).toBeGreaterThan(0);
+    expect(firstCallData.webauthnUserId).not.toBe(secondCallData.webauthnUserId);
+  });
+
+  it("トランザクションに timeout オプション（DEMO_USER_TRANSACTION_TIMEOUT_MS）を渡す", async () => {
+    const { client, userCreate, transaction } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_demo_1" });
+    getDemoExpiresAt.mockReturnValue(EXPIRES_AT);
+    buildDemoData.mockReturnValue(PLAN);
+    seedUserPresets.mockResolvedValue({ categories: [], paymentSources: [] });
+
+    await createDemoUser(client, { ipHash: "iphash-1", now: NOW });
+
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
+      timeout: DEMO_USER_TRANSACTION_TIMEOUT_MS,
+    });
+    expect(DEMO_USER_TRANSACTION_TIMEOUT_MS).toBeGreaterThan(5000); // 既定の5秒より長い
+  });
+
+  it("プリセット投入が失敗したら例外が伝播し、insertDemoData・recordDemoEvent は呼ばれない（ユーザーだけが残る経路を作らない）", async () => {
+    const { client, userCreate } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_demo_1" });
+    getDemoExpiresAt.mockReturnValue(EXPIRES_AT);
+    buildDemoData.mockReturnValue(PLAN);
+    seedUserPresets.mockRejectedValue(new Error("preset failed"));
+
+    await expect(createDemoUser(client, { ipHash: "iphash-1", now: NOW })).rejects.toThrow(
+      "preset failed",
+    );
+    expect(insertDemoData).not.toHaveBeenCalled();
+    expect(recordDemoEvent).not.toHaveBeenCalled();
+  });
+
+  it("サンプルデータの投入（insertDemoData）が失敗したら例外が伝播し、recordDemoEvent は呼ばれない（ユーザー・プリセットも巻き戻る想定）", async () => {
+    const { client, userCreate } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_demo_1" });
+    getDemoExpiresAt.mockReturnValue(EXPIRES_AT);
+    buildDemoData.mockReturnValue(PLAN);
+    seedUserPresets.mockResolvedValue({ categories: [], paymentSources: [] });
+    insertDemoData.mockRejectedValue(new Error("insert failed"));
+
+    await expect(createDemoUser(client, { ipHash: "iphash-1", now: NOW })).rejects.toThrow(
+      "insert failed",
+    );
+    expect(recordDemoEvent).not.toHaveBeenCalled();
+  });
+
+  it("DemoEvent の記録（recordDemoEvent）が失敗したら例外が伝播する", async () => {
+    const { client, userCreate } = createMockClient();
+    userCreate.mockResolvedValue({ id: "user_demo_1" });
+    getDemoExpiresAt.mockReturnValue(EXPIRES_AT);
+    buildDemoData.mockReturnValue(PLAN);
+    seedUserPresets.mockResolvedValue({ categories: [], paymentSources: [] });
+    recordDemoEvent.mockRejectedValue(new Error("record failed"));
+
+    await expect(createDemoUser(client, { ipHash: "iphash-1", now: NOW })).rejects.toThrow(
+      "record failed",
+    );
+  });
+});
+
 describe("findWebauthnUserId（userId で絞る。User は自分自身の行。設計判断 7）", () => {
   it("findFirst の where は { id: userId } で呼ぶ", async () => {
     const { client, userFindFirst } = createMockClient();
@@ -279,5 +432,41 @@ describe("findWebauthnUserId（userId で絞る。User は自分自身の行。�
     userFindFirst.mockResolvedValue(null);
 
     await expect(findWebauthnUserId(client, "user_ghost" as UserId)).resolves.toBeNull();
+  });
+});
+
+describe("findDemoExpiresAt（userId で絞る。デモ判定の唯一の情報源。docs/steps/pub-3.md 設計判断 7）", () => {
+  it("findFirst の where は { id: userId } で呼ぶ（他人のIDを渡されない前提だが念のため絞る）", async () => {
+    const { client, userFindFirst } = createMockClient();
+    userFindFirst.mockResolvedValue({ demoExpiresAt: new Date("2026-08-15T00:00:00.000Z") });
+
+    await findDemoExpiresAt(client, "user_1" as UserId);
+
+    expect(userFindFirst).toHaveBeenCalledWith({
+      where: { id: "user_1" },
+      select: { demoExpiresAt: true },
+    });
+  });
+
+  it("デモユーザー（demoExpiresAt が Date）ならその値を返す", async () => {
+    const { client, userFindFirst } = createMockClient();
+    const expiresAt = new Date("2026-08-15T00:00:00.000Z");
+    userFindFirst.mockResolvedValue({ demoExpiresAt: expiresAt });
+
+    await expect(findDemoExpiresAt(client, "user_demo" as UserId)).resolves.toEqual(expiresAt);
+  });
+
+  it("通常のユーザー（demoExpiresAt が null）なら null", async () => {
+    const { client, userFindFirst } = createMockClient();
+    userFindFirst.mockResolvedValue({ demoExpiresAt: null });
+
+    await expect(findDemoExpiresAt(client, "user_normal" as UserId)).resolves.toBeNull();
+  });
+
+  it("行が無ければ（削除された後のセッションなど）null", async () => {
+    const { client, userFindFirst } = createMockClient();
+    userFindFirst.mockResolvedValue(null);
+
+    await expect(findDemoExpiresAt(client, "user_ghost" as UserId)).resolves.toBeNull();
   });
 });

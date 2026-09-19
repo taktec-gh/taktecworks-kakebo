@@ -261,6 +261,28 @@ design-decisions.md の未決事項「デモユーザーにパスキー登録を
 | 12 | `isPublicPath` で `/api/cron/` を接頭辞一致にする | 落ちる |
 | 13 | 保持期間の削除で `LoginAttempt` の期間を7日にする | 落ちる |
 
+### 変異テストの結果（2026-09-19）
+
+**13件すべて検出。** 変異は文字列置換で1件ずつ入れ、`git diff` で入ったことを確認してから全テスト（2735件）を流し、戻した（最後に `src/` / `prisma/` の未コミット変更が無いことを確認）。
+
+| # | 落ちた件数 | 検出したテスト |
+|---|---|---|
+| 1 | 9 | `cleanup.test.ts`（条件の形、**where を解釈する疑似クライアントで「通常ユーザーは消えない」**、境界） |
+| 2 | 6 | `cleanup.test.ts`（条件の形、期限切れだけが消える、混在） |
+| 3 | 2 | `cron-auth.test.ts`「secret が空文字なら、ヘッダが『空の Bearer』でも false」ほか |
+| 4 | 8 | `cron-auth.test.ts`（違う値・接頭辞無し・長さ違い・大文字小文字）、`route.test.ts`「違う値の Bearer なら 401」 |
+| 5 | 2 | `login/actions.test.ts`「引数を受け取らない」「FormData を伴って呼ばれても無視され、createDemoUser の戻り値のユーザーにだけセッションを発行する」 |
+| 6 | 1 | `users.test.ts`「作成する User の data に demoExpiresAt が含まれる」 |
+| 7 | 1 | `login/actions.test.ts`「maxAgeSeconds は demoExpiresAt から計算した秒数」 |
+| 8 | 624 | `demo-data.test.ts` の全日付の性質テスト（2023-01-01〜2024-12-31。落ちない107日は、テンプレートの最終日（28日）以降の日付で、未来の支出がもともと無い日） |
+| 9 | 731 | `demo-data.test.ts` の全日付の性質テスト（性質 4） |
+| 10 | 3 | `demo-limits.test.ts`（IP 単位がちょうど5件で止まる境界） |
+| 11 | 5 | `settings/passkeys/actions.test.ts`（start / finish でのデモの拒否。チャレンジ無しで直接叩かれても拒否） |
+| 12 | 1 | `auth.test.ts`「接頭辞一致で広げない: /api/cron/ 配下の他のパスは公開でない」 |
+| 13 | 3 | `cleanup.test.ts`（定数、cutoff、疑似クライアントでの30日の境界） |
+
+- **#6 と #7 はそれぞれ1ケースだけが検出している。** どちらもデモの期限の中核なので、実DBの検証スクリプト（`prisma/checks/demo-cleanup.ts` の 1a）と実機確認でも見る
+
 ---
 
 ## 実機確認

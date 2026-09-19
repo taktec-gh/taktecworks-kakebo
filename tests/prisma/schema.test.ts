@@ -110,6 +110,55 @@ describe("User（設計判断 2: 最小限のモデル）", () => {
   it("webauthnUserId は String @unique（docs/steps/pub-2.md 設計判断 3）", () => {
     expect(fieldLine(body, "webauthnUserId")).toMatch(/^\s*webauthnUserId\s+String\s+@unique\s*$/);
   });
+
+  it("demoExpiresAt は任意項目（DateTime?）。null なら通常ユーザー（docs/steps/pub-3.md 設計判断 1）", () => {
+    expect(fieldLine(body, "demoExpiresAt")).toMatch(/^\s*demoExpiresAt\s+DateTime\?\s*$/);
+  });
+
+  it("demoExpiresAt のインデックスがある（期限切れの削除の検索用。設計判断 1）", () => {
+    expect(body).toContain("@@index([demoExpiresAt])");
+  });
+});
+
+describe("DemoEvent（userId を持たない3つ目のモデル。docs/steps/pub-3.md 設計判断 4）", () => {
+  const body = extractModel("DemoEvent");
+
+  it("userId フィールドを持たない（デモユーザーが消えても記録は残る）", () => {
+    expect(body).not.toMatch(/^\s*userId\s+/m);
+  });
+
+  it("ipHash（IP の HMAC）を持つ", () => {
+    expect(fieldLine(body, "ipHash")).toMatch(/String/);
+  });
+
+  it("id は String @id @default(cuid())", () => {
+    expect(fieldLine(body, "id")).toMatch(/String\s+@id\s+@default\(cuid\(\)\)/);
+  });
+
+  it("createdAt を持つ", () => {
+    expect(fieldLine(body, "createdAt")).toMatch(/DateTime\s+@default\(now\(\)\)/);
+  });
+
+  it("updatedAt を持たない（LoginAttempt/SignupEvent と同じく追記のみ）", () => {
+    expect(body).not.toMatch(/^\s*updatedAt\s+/m);
+  });
+
+  it("createdAt 単体のインデックスを持つ（全体のレート制限の集計用）", () => {
+    expect(body).toContain("@@index([createdAt])");
+  });
+
+  it("[ipHash, createdAt] の複合インデックスを持つ（IP単位のレート制限の集計用）", () => {
+    expect(body).toContain("@@index([ipHash, createdAt])");
+  });
+});
+
+describe("共通規約のコメントに DemoEvent の例外が書かれている（docs/steps/pub-3.md 実装内容「スキーマ冒頭の共通規約のコメントに DemoEvent の例外を足す」）", () => {
+  it("スキーマ冒頭のコメントが LoginAttempt・SignupEvent・DemoEvent の3つを例外として挙げる", () => {
+    const header = schemaText.slice(0, schemaText.indexOf("generator client"));
+    expect(header).toContain("LoginAttempt");
+    expect(header).toContain("SignupEvent");
+    expect(header).toContain("DemoEvent");
+  });
 });
 
 describe(`userId を持つデータモデル（${USER_SCOPED_MODELS.join(", ")}）`, () => {
