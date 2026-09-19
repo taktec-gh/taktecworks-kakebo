@@ -27,7 +27,8 @@
 ### DB
 
 - **元になった単一ユーザー版の `.env` や接続先を絶対に使わない。** そちらには実データが入っている
-- 開発用DBはローカルの Docker（PostgreSQL）を使う予定。本番DB（Neon）は公開時に新規に作る。**本番・プレビュー・開発でDBと鍵を分ける**
+- 開発用DBはローカルの Docker（PostgreSQL、`compose.yaml`。ポート 5433）。本番DB（Neon）は公開時に新規に作る。**本番・プレビュー・開発でDBと鍵を分ける**
+- 実DBでの分離の検証は `npx tsx prisma/checks/data-isolation.ts`（接続先がローカル以外なら何もせず終わる。作ったデータは自分で消す）
 - **`prisma migrate reset` はローカルDockerのDBに対してのみ、利用者の同意を得てから実行する。** リモートのDBには実行しない。
   Prisma 7 の AI エージェント向けガードを回避しない。「エージェントへの指示」は利用者の同意ではない
 - 検証用データを投入したら必ず削除し、何を入れて何を消したかを報告する
@@ -45,13 +46,13 @@
 
 | | |
 |---|---|
-| 状態 | 単一ユーザー版のコードをコピーした直後。**これから複数ユーザー化の改修に入る** |
-| 次 | データ分離（全テーブルに `userId`） |
-| テスト | 1612件（`npx vitest run`）。**コピー直後の基準線として全件成功を確認済み**（2026-09-14） |
+| 状態 | **公開版 Step 1（データ分離）が完了**（2026-09-19）。全データが `userId` で分離され、変異テスト12件がすべて検出 |
+| 次 | 認証（サインアップ・パスキー登録）。**Step 1 で持ち越した画面での実機確認をここで行う** |
+| テスト | 1650件（`npx vitest run`）。すべて成功 |
 | 本番URL | 未公開。Vercelプロジェクト名は `taktecworks-kakebo`（候補）。**最初のデプロイ前に確定し、以後変えない** |
 
-**認証はパスキー（WebAuthn）。** 単一ユーザー版のパスワードログイン（`APP_PASSWORD`）と
-`RECOVERY_MODE` は、公開版では廃止する（設計方針 3）。
+**認証はパスキー（WebAuthn）のみ。** パスワードログイン（`APP_PASSWORD`）と `RECOVERY_MODE` は Step 1 で廃止した。
+**今はサインアップが無いため、ブラウザからログインする手段が無い**（Step 1 の設計判断 1）。
 
 ---
 
@@ -64,7 +65,8 @@
 | [docs/roadmap.md](./docs/roadmap.md) | 単一ユーザー版の Step の順序と根拠、進め方、**踏んだ失敗と規約**（公開版でも有効） |
 | [docs/tech-stack.md](./docs/tech-stack.md) | 技術選定の理由と、**学習データと違う点** |
 | [docs/deploy.md](./docs/deploy.md) | 単一ユーザー版のデプロイ記録（個人情報を除去済み）。公開時に書き直す |
-| [docs/steps/step-N.md](./docs/steps) | 各 Step の指示書。step-1.md のみ事後の記録 |
+| [docs/steps/pub-N.md](./docs/steps) | **公開版**の各 Step の指示書 |
+| [docs/steps/step-N.md](./docs/steps) | 単一ユーザー版の各 Step の指示書（参考）。step-1.md のみ事後の記録 |
 
 ---
 
@@ -78,7 +80,7 @@ Step 単位で進め、**実装とテストを別のエージェントが担当�
 | `implementer` | 機能コードを書く（テストは書かない） | `src/`, `prisma/` | 呼び出し元を継承 |
 | `tester` | 単体テストを書き、実行する | `tests/`, `vitest.config.ts` | **Sonnet 固定** |
 
-**サイクル**: 指示書を `docs/steps/step-N.md` に書く → implementer → **コミット**（書き込み範囲を測る基準線。飛ばさない）
+**サイクル**: 指示書を `docs/steps/pub-N.md` に書く → implementer → **コミット**（書き込み範囲を測る基準線。飛ばさない）
 → 引き継ぎを追記 → tester → 書き込み範囲の検証 → **変異テスト** → コミット → 実機確認 → マージ。
 
 - 仕様はプロンプトに埋め込まず、指示書のファイルを読ませる
@@ -105,3 +107,13 @@ Step 単位で進め、**実装とテストを別のエージェントが担当�
 - **npm 11 は依存パッケージのインストールスクリプトを承認制にしている。**
   `@prisma/engines` / `prisma` / `esbuild` / `unrs-resolver` が未承認。Prisma クライアントの生成とテストは動くが、
   `prisma migrate` でエンジンが要る場合は利用者に承認を確認する（勝手に承認しない）
+- **`DATABASE_URL` のホストは `localhost` ではなく `127.0.0.1`。**`localhost` が IPv6 の `::1` に解決され、
+  IPv4 だけに公開した Docker のポートに届かず P1001 になる
+- **この環境では、PC → Docker の DB へ送るデータが約1.3KBを超えると止まる**（2026-09-19 に確認）。
+  - 1,200バイトのクエリは通り、1,400バイト以上は応答が無い（Node の `pg` で直接送っても同じ）。DB → PC 方向は1MBでも通る
+  - DB側には何も届かず、ログも残らない。Prisma では約20秒後に P1017（Server has closed the connection）になる。
+    原因は Docker Desktop のポート転送か経路の MTU と見ているが、**未解決**
+  - **`prisma migrate dev` と、DBと比較する `migrate diff` が使えない**（列の一覧を取る約2KBのクエリで止まる）。
+    回避策は、`prisma migrate diff --from-schema <旧> --to-schema prisma/schema.prisma --script` で DB を使わずに SQL を作り、
+    読んで確認してから `prisma migrate deploy` で当てること（Step 1 はこの方法で行った）
+  - **アプリの動作確認でも、長いメモなど大きな書き込みで固まるはず。** 実機確認で固まったら、まずこれを疑う

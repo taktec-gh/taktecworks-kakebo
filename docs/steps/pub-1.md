@@ -481,7 +481,9 @@ implementer の実装が完了した時点（コミット `5f12290`、2026-09-19
 
 ---
 
-## この Step で決まること（完了後に design-decisions.md へ移す）
+## この Step で決まること
+
+> **2026-09-19 に [design-decisions.md](../design-decisions.md)「6. データ分離の実装で決めたこと」へ移した。** 以下は指示書を書いた時点の一覧。
 
 - `User` は最小限、`onDelete: Cascade`
 - `LoginAttempt` だけは `userId` を持たない
