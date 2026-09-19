@@ -265,6 +265,28 @@ WebAuthn の仕様（ユーザー名なしのログインで RP が行う検証�
 | 11 | `finishSignupAction` の成功時にセッションを発行しない | 落ちる |
 | 12 | `SignupEvent` の記録をトランザクションの外（ユーザー作成の後）に出す | 落ちる |
 
+### 変異テストの結果（2026-09-19）
+
+**12件すべて検出。** 変異は文字列置換で1件ずつ入れ、`git diff` で入ったことを確認してから全テストを流し、戻した（最後に `src/` / `prisma/` の未コミット変更が無いことを確認）。テスト総数は1804件。
+
+| # | 落ちた件数 | 検出したテスト |
+|---|---|---|
+| 1 | 5 | `signup/actions.test.ts`（検証失敗・例外でユーザーを作らない、単回性 など） |
+| 2 | 1 | `users.test.ts`「成功時: User作成 → createCredential → recordSignupEvent の順で同じトランザクション内に呼ばれ…」 |
+| 3 | 3 | `passkey.test.ts`（定数、3×3 の取り違え）、`passkey-session.test.ts`（signup のトークンを register / authenticate として消費できない） |
+| 4 | 2 | `signup/actions.test.ts`「Cookie から取り出した webauthnUserId を渡す」「応答の余分なフィールドを無視する」 |
+| 5 | 3 | `signup-limits.test.ts`（IP 単位がちょうど3件で止まる境界） |
+| 6 | 3 | `signup-limits.test.ts`（全体がちょうど100件で止まる境界） |
+| 7 | 2 | `signup/actions.test.ts`「完了時にもレート制限を確認する」「開始・完了で1回ずつ呼ぶ」 |
+| 8 | 3 | `passkey-actions.test.ts`（別人の user handle・欠落・空文字） |
+| 9 | 1 | `settings/passkeys/actions.test.ts`「userID にはそのユーザーの webauthnUserId 由来のバイト列を使う」 |
+| 10 | 1 | `auth.test.ts`「接頭辞一致で広げない: /signupx・/signup-admin・/signup/foo は公開でない」 |
+| 11 | 2 | `signup/actions.test.ts`「今作ったユーザーに対してセッションを発行する」ほか |
+| 12 | 1 | #2 と同じ `users.test.ts` の1ケース |
+
+- **#2 と #12 は同じ1ケースだけが検出している。** トランザクションの境界はモックでは「`tx` で呼ばれたか」でしか見られない。
+  実際の PostgreSQL で戻ることは、検証スクリプト（`prisma/checks/data-isolation.ts` の 7b）が確認している
+
 ---
 
 ## 実機確認（Step 1 からの持ち越しを含む）

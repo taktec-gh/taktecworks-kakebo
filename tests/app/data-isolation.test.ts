@@ -944,6 +944,54 @@ const ISOLATION_TABLE: IsolationCase[] = [
       );
     },
   },
+  // サインアップ（docs/steps/pub-2.md）はログイン前の操作で、まだ誰のセッションも無いため
+  // 「Aのセッションで…」という分離の枠組み自体が当てはまらない。ログインの2行と同じ形で、
+  // 「他人のデータに触れない」ことに相当する性質（webauthnUserId の出どころ・今作った
+  // ユーザーにだけセッションが発行されること）が既存テストで検証済みであることを確認する
+  // （docs/steps/pub-2.md「tester 向けの方針」11）。
+  {
+    action: "startSignupAction",
+    file: "src/app/(auth)/signup/actions.ts",
+    target: "（未ログイン。誰のセッションも無い。DBには何も書かない）",
+    operation: "登録用オプションの発行",
+    scenario:
+      "DB には何も書かず、呼ぶたびに新しい webauthnUserId を Cookie に載せる" +
+      "（既存アカウントに紐付かない・他人の値を使わない）ことが既存テストで検証済みであることを確認する",
+    run: async () => {
+      const content = readFileSync(
+        join(REPO_ROOT, "tests", "app", "(auth)", "signup", "actions.test.ts"),
+        "utf8",
+      );
+      expect(content).toContain(
+        "成功時はオプションを返し、チャレンジと webauthnUserId を Cookie に載せる。DB は書かない",
+      );
+      expect(content).toContain("呼ぶたびに違う webauthnUserId になる");
+    },
+  },
+  {
+    action: "finishSignupAction",
+    file: "src/app/(auth)/signup/actions.ts",
+    target: "（未ログイン。署名付き Cookie の webauthnUserId で今作ったユーザーにセッション発行）",
+    operation: "登録応答の検証とユーザー作成",
+    scenario:
+      "作るユーザーの webauthnUserId は署名付き Cookie の値であり応答・フォームの値ではないこと、" +
+      "セッションは今作ったユーザーに対してのみ発行されることが既存テストで検証済みであることを確認する",
+    run: async () => {
+      const content = readFileSync(
+        join(REPO_ROOT, "tests", "app", "(auth)", "signup", "actions.test.ts"),
+        "utf8",
+      );
+      expect(content).toContain(
+        "createUserWithPasskey には Cookie から取り出した webauthnUserId を渡す（応答・フォームの値ではない）",
+      );
+      expect(content).toContain(
+        "応答に webauthnUserId らしき余分なフィールドが付いていても無視する（Cookie の値だけを使う）",
+      );
+      expect(content).toContain(
+        "成功したら、今作ったユーザー（createUserWithPasskey の戻り値の userId）に対してセッションを発行する",
+      );
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------

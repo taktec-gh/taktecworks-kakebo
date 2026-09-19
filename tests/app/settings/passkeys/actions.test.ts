@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChallengeToken } from "@/lib/passkey";
 import { PASSKEY_ERRORS } from "@/lib/passkey-messages";
 import type { UserId } from "@/lib/user-id";
+import { getPasskeyDisplayName } from "@/lib/webauthn-user-id";
 
 import type { RegistrationResponseJSON } from "@simplewebauthn/server";
 
@@ -100,6 +101,15 @@ vi.mock("@/lib/credentials", () => ({
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 
+// ---- @/lib/users のモック（webauthnUserId の取得。docs/steps/pub-2.md 設計判断 3・7）----
+const findWebauthnUserId = vi.fn();
+vi.mock("@/lib/users", () => ({
+  findWebauthnUserId: (...args: unknown[]) => findWebauthnUserId(...args),
+}));
+
+const USER_WEBAUTHN_USER_ID = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+const OTHER_USER_WEBAUTHN_USER_ID = "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA";
+
 const {
   startPasskeyRegistrationAction,
   finishPasskeyRegistrationAction,
@@ -170,6 +180,8 @@ beforeEach(() => {
   createCredential.mockResolvedValue({ ok: true, value: makeCredential() });
   deleteCredential.mockReset();
   deleteCredential.mockResolvedValue({ ok: true, value: null });
+  findWebauthnUserId.mockReset();
+  findWebauthnUserId.mockResolvedValue(USER_WEBAUTHN_USER_ID);
 
   vi.stubEnv("AUTH_SECRET", SECRET);
   vi.stubEnv("RP_ID", RP_ID);
@@ -249,6 +261,53 @@ describe("startPasskeyRegistrationAction", () => {
     vi.stubEnv("RP_ID", "");
     const result = await startPasskeyRegistrationAction();
     expect(result).toEqual({ ok: false, error: PASSKEY_ERRORS.configMissing });
+  });
+
+  describe("webauthnUserId と表示名（docs/steps/pub-2.md 設計判断 3・7）", () => {
+    it("findWebauthnUserId を requireUserId が返した userId で呼ぶ", async () => {
+      await startPasskeyRegistrationAction();
+      expect(findWebauthnUserId).toHaveBeenCalledWith(expect.anything(), USER_ID);
+    });
+
+    it("userID にはそのユーザーの webauthnUserId 由来のバイト列を使う（毎回新しく作らない）", async () => {
+      await startPasskeyRegistrationAction();
+      const [[options]] = generateRegistrationOptions.mock.calls as [
+        [{ userID: Uint8Array; userName: string; userDisplayName: string }],
+      ];
+      // webauthnUserIdToBytes(USER_WEBAUTHN_USER_ID) と同じバイト列になるはず
+      expect(Buffer.from(options.userID).toString("base64url")).toBe(USER_WEBAUTHN_USER_ID);
+    });
+
+    it("表示名（userName/userDisplayName）は webauthnUserId から決まる値で、他のユーザーの値ではない", async () => {
+      await startPasskeyRegistrationAction();
+      const expectedName = getPasskeyDisplayName(USER_WEBAUTHN_USER_ID);
+      const otherName = getPasskeyDisplayName(OTHER_USER_WEBAUTHN_USER_ID);
+      expect(expectedName).not.toBe(otherName);
+
+      const [[options]] = generateRegistrationOptions.mock.calls as [
+        [{ userID: Uint8Array; userName: string; userDisplayName: string }],
+      ];
+      expect(options.userName).toBe(expectedName);
+      expect(options.userDisplayName).toBe(expectedName);
+    });
+
+    it("別のユーザーの webauthnUserId が返ってきたら、そのユーザーの表示名になる（他ユーザーの値を使わない）", async () => {
+      findWebauthnUserId.mockResolvedValue(OTHER_USER_WEBAUTHN_USER_ID);
+      await startPasskeyRegistrationAction();
+      const [[options]] = generateRegistrationOptions.mock.calls as [
+        [{ userID: Uint8Array; userName: string; userDisplayName: string }],
+      ];
+      expect(options.userName).toBe(getPasskeyDisplayName(OTHER_USER_WEBAUTHN_USER_ID));
+      expect(options.userName).not.toBe(getPasskeyDisplayName(USER_WEBAUTHN_USER_ID));
+    });
+
+    it("webauthnUserId が見つからない（アカウントが消えた後のセッションなど）なら accountNotFound を返し、DB を呼ばない", async () => {
+      findWebauthnUserId.mockResolvedValue(null);
+      const result = await startPasskeyRegistrationAction();
+      expect(result).toEqual({ ok: false, error: PASSKEY_ERRORS.accountNotFound });
+      expect(listCredentials).not.toHaveBeenCalled();
+      expect(generateRegistrationOptions).not.toHaveBeenCalled();
+    });
   });
 });
 

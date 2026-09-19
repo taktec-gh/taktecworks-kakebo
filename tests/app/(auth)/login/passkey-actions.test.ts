@@ -104,6 +104,9 @@ const { startPasskeyLoginAction, verifyPasskeyLoginAction } = await import(
   "@/app/(auth)/login/passkey-actions"
 );
 
+// 資格情報の持ち主の webauthnUserId（設計判断 4）。応答の userHandle と照合される
+const OWNER_WEBAUTHN_USER_ID = "owner-webauthn-user-id-1";
+
 function makeCredential(
   overrides: Partial<{
     credentialId: string;
@@ -111,8 +114,10 @@ function makeCredential(
     counter: bigint;
     transports: string[];
     userId: string;
+    webauthnUserId: string;
   }> = {},
 ) {
+  const { webauthnUserId, ...rest } = overrides;
   return {
     id: "cred_1",
     userId: CREDENTIAL_OWNER_ID,
@@ -124,16 +129,24 @@ function makeCredential(
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     updatedAt: new Date("2026-08-01T00:00:00.000Z"),
     lastUsedAt: null,
-    ...overrides,
+    user: { webauthnUserId: webauthnUserId ?? OWNER_WEBAUTHN_USER_ID },
+    ...rest,
   };
 }
 
+// userHandle は資格情報の持ち主（OWNER_WEBAUTHN_USER_ID）と一致させておく。
+// 既定では一致し、user handle の不一致だけを検証するテストで個別に上書きする
 const authResponse = {
   id: "cred-1",
   rawId: "cred-1",
   type: "public-key" as const,
   clientExtensionResults: {},
-  response: { clientDataJSON: "e30", authenticatorData: "e30", signature: "e30" },
+  response: {
+    clientDataJSON: "e30",
+    authenticatorData: "e30",
+    signature: "e30",
+    userHandle: OWNER_WEBAUTHN_USER_ID,
+  },
 };
 
 beforeEach(() => {
@@ -441,6 +454,67 @@ describe("verifyPasskeyLoginAction — 未登録・検証失敗・counter", () =
     expect(loginAttemptCreate).toHaveBeenCalledWith({
       data: { ipHash: expect.any(String), succeeded: false },
     });
+  });
+});
+
+describe("verifyPasskeyLoginAction — user handle の照合（docs/steps/pub-2.md 設計判断 4）", () => {
+  it("応答の userHandle が資格情報の持ち主の webauthnUserId と一致すれば成功する", async () => {
+    const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET);
+    cookieStore.set("kakeibo_passkey_auth", { name: "kakeibo_passkey_auth", value: token });
+
+    const result = await verifyPasskeyLoginAction(authResponse);
+
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("userHandle が別人の webauthnUserId（他人の資格情報に自分の user handle を付けた応答）なら失敗し、署名検証は行わない", async () => {
+    credentialFindUnique.mockResolvedValue(
+      makeCredential({ webauthnUserId: OWNER_WEBAUTHN_USER_ID }),
+    );
+    const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET);
+    cookieStore.set("kakeibo_passkey_auth", { name: "kakeibo_passkey_auth", value: token });
+
+    const tamperedResponse = {
+      ...authResponse,
+      response: { ...authResponse.response, userHandle: "someone-elses-webauthn-user-id" },
+    };
+    const result = await verifyPasskeyLoginAction(tamperedResponse);
+
+    expect(result).toEqual({ ok: false, error: LOGIN_ERROR_MESSAGE_EXPECTED });
+    expect(verifyAuthenticationResponse).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(loginAttemptCreate).toHaveBeenCalledWith({
+      data: { ipHash: expect.any(String), succeeded: false },
+    });
+  });
+
+  it("userHandle が無い応答（discoverable credential のはずが欠落）なら失敗する", async () => {
+    const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET);
+    cookieStore.set("kakeibo_passkey_auth", { name: "kakeibo_passkey_auth", value: token });
+
+    const withoutUserHandle = {
+      ...authResponse,
+      response: { clientDataJSON: "e30", authenticatorData: "e30", signature: "e30" },
+    };
+    const result = await verifyPasskeyLoginAction(withoutUserHandle);
+
+    expect(result).toEqual({ ok: false, error: LOGIN_ERROR_MESSAGE_EXPECTED });
+    expect(verifyAuthenticationResponse).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("userHandle が空文字なら失敗する", async () => {
+    const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET);
+    cookieStore.set("kakeibo_passkey_auth", { name: "kakeibo_passkey_auth", value: token });
+
+    const emptyUserHandle = {
+      ...authResponse,
+      response: { ...authResponse.response, userHandle: "" },
+    };
+    const result = await verifyPasskeyLoginAction(emptyUserHandle);
+
+    expect(result).toEqual({ ok: false, error: LOGIN_ERROR_MESSAGE_EXPECTED });
+    expect(verifyAuthenticationResponse).not.toHaveBeenCalled();
   });
 });
 

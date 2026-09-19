@@ -106,6 +106,10 @@ describe("User（設計判断 2: 最小限のモデル）", () => {
     expect(fieldLine(body, "createdAt")).toMatch(/DateTime\s+@default\(now\(\)\)/);
     expect(fieldLine(body, "updatedAt")).toMatch(/DateTime\s+@updatedAt/);
   });
+
+  it("webauthnUserId は String @unique（docs/steps/pub-2.md 設計判断 3）", () => {
+    expect(fieldLine(body, "webauthnUserId")).toMatch(/^\s*webauthnUserId\s+String\s+@unique\s*$/);
+  });
 });
 
 describe(`userId を持つデータモデル（${USER_SCOPED_MODELS.join(", ")}）`, () => {
@@ -133,6 +137,46 @@ describe("LoginAttempt（userId を持たない唯一のモデル。設計判断
 
   it("updatedAt を持たない（追記のみで更新しない。共通規約の唯一の例外）", () => {
     expect(body).not.toMatch(/^\s*updatedAt\s+/m);
+  });
+});
+
+describe("SignupEvent（userId を持たない2つ目のモデル。LoginAttempt に続く例外。設計判断 5）", () => {
+  const body = extractModel("SignupEvent");
+
+  it("userId フィールドを持たない（アカウントを消しても記録は残る。Cascade で消えると制限を回避できるため）", () => {
+    expect(body).not.toMatch(/^\s*userId\s+/m);
+  });
+
+  it("ipHash（IP の HMAC）を持つ", () => {
+    expect(fieldLine(body, "ipHash")).toMatch(/String/);
+  });
+
+  it("id は String @id @default(cuid())", () => {
+    expect(fieldLine(body, "id")).toMatch(/String\s+@id\s+@default\(cuid\(\)\)/);
+  });
+
+  it("createdAt を持つ", () => {
+    expect(fieldLine(body, "createdAt")).toMatch(/DateTime\s+@default\(now\(\)\)/);
+  });
+
+  it("updatedAt を持たない（LoginAttempt と同じく追記のみ）", () => {
+    expect(body).not.toMatch(/^\s*updatedAt\s+/m);
+  });
+
+  it("createdAt 単体のインデックスを持つ（全体のレート制限の集計用）", () => {
+    expect(body).toContain("@@index([createdAt])");
+  });
+
+  it("[ipHash, createdAt] の複合インデックスを持つ（IP単位のレート制限の集計用）", () => {
+    expect(body).toContain("@@index([ipHash, createdAt])");
+  });
+});
+
+describe("共通規約のコメントに SignupEvent の例外が書かれている（設計判断 5）", () => {
+  it("スキーマ冒頭のコメントが LoginAttempt と SignupEvent の両方を例外として挙げる", () => {
+    const header = schemaText.slice(0, schemaText.indexOf("generator client"));
+    expect(header).toContain("LoginAttempt");
+    expect(header).toContain("SignupEvent");
   });
 });
 
