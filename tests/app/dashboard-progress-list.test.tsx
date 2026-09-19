@@ -6,6 +6,9 @@
 // - docs/steps/step-6.md「バーの実装は CSS（幅の%）でよい。…消化率が100%を超えたら
 //   バーは100%で止め、色で超過を示す」
 // - docs/steps/step-6.md「tester への引き継ぎ > 公開インターフェース」
+// - docs/steps/pub-4.md 設計判断 3（インラインの `style` をやめ、SVG の `<rect width="…%">` に
+//   置き換える。見た目と割合の表し方は変えない）と「実装完了後の引き継ぎ」
+//   （DOM は `div[aria-hidden="true"] > svg > rect[width="N%"]`）
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
@@ -66,22 +69,27 @@ describe("DashboardProgressBar", () => {
 
   it("50%のときバーの幅は50%", () => {
     const { container } = render(<DashboardProgressBar usageRatio={0.5} status="under" />);
-    const bar = container.querySelector('[aria-hidden="true"] > div') as HTMLElement;
-    expect(bar.style.width).toBe("50%");
+    const rect = container.querySelector('[aria-hidden="true"] > svg > rect') as SVGRectElement;
+    expect(rect.getAttribute("width")).toBe("50%");
   });
 
   it("100%を超えてもバーの幅は100%で止まる", () => {
     const { container } = render(<DashboardProgressBar usageRatio={1.5} status="over" />);
-    const bar = container.querySelector('[aria-hidden="true"] > div') as HTMLElement;
-    expect(bar.style.width).toBe("100%");
+    const rect = container.querySelector('[aria-hidden="true"] > svg > rect') as SVGRectElement;
+    expect(rect.getAttribute("width")).toBe("100%");
   });
 
   it("Infinity（予算0円で使ってしまった）でも100%で止まる", () => {
     const { container } = render(
       <DashboardProgressBar usageRatio={Number.POSITIVE_INFINITY} status="over" />,
     );
-    const bar = container.querySelector('[aria-hidden="true"] > div') as HTMLElement;
-    expect(bar.style.width).toBe("100%");
+    const rect = container.querySelector('[aria-hidden="true"] > svg > rect') as SVGRectElement;
+    expect(rect.getAttribute("width")).toBe("100%");
+  });
+
+  it("インラインの style 属性を使わない（CSP の style-src に 'unsafe-inline' が無くても崩れない）", () => {
+    const { container } = render(<DashboardProgressBar usageRatio={0.5} status="under" />);
+    expect(container.querySelector("[style]")).toBeNull();
   });
 });
 
