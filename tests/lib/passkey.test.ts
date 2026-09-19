@@ -18,7 +18,10 @@ import {
   PASSKEY_ERRORS,
   REGISTER_CHALLENGE_COOKIE_NAME,
   REGISTER_CHALLENGE_SUBJECT,
+  SIGNUP_CHALLENGE_COOKIE_NAME,
+  SIGNUP_CHALLENGE_SUBJECT,
   createChallengeToken,
+  createSignupChallengeToken,
   getChallengeCookieName,
   getChallengeCookieOptions,
   getChallengeSubject,
@@ -29,12 +32,16 @@ import {
   validateCredentialId,
   validateDeviceName,
   verifyChallengeToken,
+  verifySignupChallengeToken,
 } from "@/lib/passkey";
 import type { UserId } from "@/lib/user-id";
 
 const SECRET = "test-auth-secret-0123456789abcdef";
 const OTHER_SECRET = "another-auth-secret-fedcba9876543210";
 const USER_ID = "user_1" as UserId;
+// 32バイトの手元生成済み固定値（node -e "Buffer.from([1..32]).toString('base64url')"）
+const WEBAUTHN_USER_ID = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+const OTHER_WEBAUTHN_USER_ID = "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA";
 
 describe("getChallengeSubject / getChallengeCookieName", () => {
   it("register の sub は passkey-register、Cookie 名は kakeibo_passkey_register", () => {
@@ -335,6 +342,160 @@ describe("createChallengeToken / verifyChallengeToken", () => {
     await expect(verifyChallengeToken(token, "authenticate", "")).rejects.toThrow(
       "AUTH_SECRET is not set",
     );
+  });
+});
+
+describe("createSignupChallengeToken / verifySignupChallengeToken（docs/steps/pub-2.md 設計判断 2・3）", () => {
+  const NOW = new Date("2026-08-14T00:00:00.000Z");
+
+  it("定数: sub は passkey-signup、Cookie 名は kakeibo_passkey_signup", () => {
+    expect(SIGNUP_CHALLENGE_SUBJECT).toBe("passkey-signup");
+    expect(SIGNUP_CHALLENGE_COOKIE_NAME).toBe("kakeibo_passkey_signup");
+  });
+
+  it("発行したトークンをそのまま検証でき、チャレンジと webauthnUserId が往復する", async () => {
+    const token = await createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, SECRET, {
+      now: NOW,
+    });
+    await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toEqual({
+      challenge: "CHALLENGE",
+      webauthnUserId: WEBAUTHN_USER_ID,
+    });
+  });
+
+  it("webauthnUserId の形式が不正なら createSignupChallengeToken は throw する（Cookie に不正な値を入れない）", async () => {
+    await expect(
+      createSignupChallengeToken("CHALLENGE", "not-a-valid-id", SECRET, { now: NOW }),
+    ).rejects.toThrow("invalid webauthnUserId");
+  });
+
+  it("webauthnUserId クレームが無いトークン（手作りで欠落させる）は null", async () => {
+    const { SignJWT } = await import("jose");
+    const key = new TextEncoder().encode(SECRET);
+    const issuedAt = Math.floor(NOW.getTime() / 1000);
+    const token = await new SignJWT({ challenge: "CHALLENGE" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(SIGNUP_CHALLENGE_SUBJECT)
+      .setIssuedAt(issuedAt)
+      .setExpirationTime(issuedAt + 120)
+      .sign(key);
+    await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toBeNull();
+  });
+
+  it("webauthnUserId クレームの形式が不正なトークンは null", async () => {
+    const { SignJWT } = await import("jose");
+    const key = new TextEncoder().encode(SECRET);
+    const issuedAt = Math.floor(NOW.getTime() / 1000);
+    const token = await new SignJWT({ challenge: "CHALLENGE", webauthnUserId: "bogus" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(SIGNUP_CHALLENGE_SUBJECT)
+      .setIssuedAt(issuedAt)
+      .setExpirationTime(issuedAt + 120)
+      .sign(key);
+    await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toBeNull();
+  });
+
+  it("期限切れ（120秒超）は null", async () => {
+    const token = await createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, SECRET, {
+      now: NOW,
+    });
+    const after = new Date(NOW.getTime() + (CHALLENGE_MAX_AGE_SECONDS + 1) * 1000);
+    await expect(verifySignupChallengeToken(token, SECRET, { now: after })).resolves.toBeNull();
+  });
+
+  it("別の鍵で署名されたトークンは null", async () => {
+    const token = await createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, SECRET, {
+      now: NOW,
+    });
+    await expect(
+      verifySignupChallengeToken(token, OTHER_SECRET, { now: NOW }),
+    ).resolves.toBeNull();
+  });
+
+  it("token が undefined / null / 空文字なら null", async () => {
+    await expect(verifySignupChallengeToken(undefined, SECRET)).resolves.toBeNull();
+    await expect(verifySignupChallengeToken(null, SECRET)).resolves.toBeNull();
+    await expect(verifySignupChallengeToken("", SECRET)).resolves.toBeNull();
+  });
+
+  it("secret が空文字なら createSignupChallengeToken は throw する", async () => {
+    await expect(
+      createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, ""),
+    ).rejects.toThrow("AUTH_SECRET is not set");
+  });
+
+  it("secret が空文字なら verifySignupChallengeToken は throw する", async () => {
+    const token = await createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, SECRET, {
+      now: NOW,
+    });
+    await expect(verifySignupChallengeToken(token, "")).rejects.toThrow(
+      "AUTH_SECRET is not set",
+    );
+  });
+
+  it("2回発行しても webauthnUserId が異なれば、それぞれ独立して往復する（取り違えない）", async () => {
+    const tokenA = await createSignupChallengeToken("CHALLENGE-A", WEBAUTHN_USER_ID, SECRET, {
+      now: NOW,
+    });
+    const tokenB = await createSignupChallengeToken(
+      "CHALLENGE-B",
+      OTHER_WEBAUTHN_USER_ID,
+      SECRET,
+      { now: NOW },
+    );
+    await expect(verifySignupChallengeToken(tokenA, SECRET, { now: NOW })).resolves.toEqual({
+      challenge: "CHALLENGE-A",
+      webauthnUserId: WEBAUTHN_USER_ID,
+    });
+    await expect(verifySignupChallengeToken(tokenB, SECRET, { now: NOW })).resolves.toEqual({
+      challenge: "CHALLENGE-B",
+      webauthnUserId: OTHER_WEBAUTHN_USER_ID,
+    });
+  });
+});
+
+describe("チャレンジの用途の取り違え: register・authenticate・signup の 3×3（docs/steps/pub-2.md「tester 向けの方針」2）", () => {
+  const NOW = new Date("2026-08-14T00:00:00.000Z");
+
+  it("register で発行したトークンは register でのみ通り、authenticate・signup では通らない", async () => {
+    const token = await createChallengeToken("CHALLENGE", "register", SECRET, { now: NOW });
+
+    await expect(verifyChallengeToken(token, "register", SECRET, { now: NOW })).resolves.toBe(
+      "CHALLENGE",
+    );
+    await expect(
+      verifyChallengeToken(token, "authenticate", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
+    await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toBeNull();
+  });
+
+  it("authenticate で発行したトークンは authenticate でのみ通り、register・signup では通らない", async () => {
+    const token = await createChallengeToken("CHALLENGE", "authenticate", SECRET, { now: NOW });
+
+    await expect(
+      verifyChallengeToken(token, "authenticate", SECRET, { now: NOW }),
+    ).resolves.toBe("CHALLENGE");
+    await expect(
+      verifyChallengeToken(token, "register", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
+    await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toBeNull();
+  });
+
+  it("signup で発行したトークンは signup でのみ通り、register・authenticate では通らない", async () => {
+    const token = await createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, SECRET, {
+      now: NOW,
+    });
+
+    await expect(verifySignupChallengeToken(token, SECRET, { now: NOW })).resolves.toEqual({
+      challenge: "CHALLENGE",
+      webauthnUserId: WEBAUTHN_USER_ID,
+    });
+    await expect(
+      verifyChallengeToken(token, "register", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
+    await expect(
+      verifyChallengeToken(token, "authenticate", SECRET, { now: NOW }),
+    ).resolves.toBeNull();
   });
 });
 

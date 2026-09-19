@@ -6,6 +6,8 @@ import { listCredentials } from "@/lib/credentials";
 import { formatDateFullLabel, getCurrentDate } from "@/lib/expense-date";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/session";
+import { findWebauthnUserId } from "@/lib/users";
+import { getPasskeyDisplayName } from "@/lib/webauthn-user-id";
 
 import { deletePasskeyAction, finishPasskeyRegistrationAction, startPasskeyRegistrationAction } from "./actions";
 import type { PasskeyListItem } from "./action-state";
@@ -36,7 +38,12 @@ export default async function PasskeysPage() {
   // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
   const userId = await requireUserId();
 
-  const credentials = await listCredentials(prisma, userId);
+  const [credentials, webauthnUserId] = await Promise.all([
+    listCredentials(prisma, userId),
+    findWebauthnUserId(prisma, userId),
+  ]);
+  // パスキーの選択画面に出る表示名。同じ端末に複数のアカウントがあるときに見分けるため
+  const accountDisplayName = webauthnUserId ? getPasskeyDisplayName(webauthnUserId) : null;
   // publicKey / counter はクライアントへ渡さない
   const items: PasskeyListItem[] = credentials.map((credential) => ({
     id: credential.id,
@@ -52,8 +59,21 @@ export default async function PasskeysPage() {
           ← ホーム
         </Link>
         <h1 className="text-xl font-bold">パスキー</h1>
+        {accountDisplayName ? (
+          <p className="text-sm">
+            このアカウントの表示名:{" "}
+            <span className="font-semibold">
+              {accountDisplayName}
+            </span>
+            <br />
+            <span className="opacity-70">
+              パスキーを選ぶ画面では、この名前で表示されます。
+            </span>
+          </p>
+        ) : null}
         <p className="text-sm opacity-70">
-          パスキーを1台でも登録すると、登録した端末からしかログインできなくなります。
+          別の端末でも使うには、その端末でログインしてから（スマホのパスキーを QR コードで使ってログインできます）、この画面で「この端末を登録」を押してください。
+          別の端末で新しくアカウントを作ると、別のアカウントになります。
         </p>
       </header>
 

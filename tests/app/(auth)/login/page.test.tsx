@@ -35,4 +35,15 @@ describe("ログインページ", () => {
     expect(screen.queryByLabelText("パスワード")).not.toBeInTheDocument();
     expect(screen.queryByText("パスワードでログイン")).not.toBeInTheDocument();
   });
+
+  it("サインアップ画面へのリンク（アカウントを作る → /signup）を持つ（docs/steps/pub-2.md 設計判断 6）", () => {
+    render(<LoginPage />);
+    const link = screen.getByRole("link", { name: "アカウントを作る" });
+    expect(link).toHaveAttribute("href", "/signup");
+  });
+
+  it("別の端末のパスキーが QR コードで使えることを短く添える（docs/steps/pub-2.md 設計判断 8）", () => {
+    render(<LoginPage />);
+    expect(screen.getByText(/QR コードを使ってログインに使えます/)).toBeInTheDocument();
+  });
 });

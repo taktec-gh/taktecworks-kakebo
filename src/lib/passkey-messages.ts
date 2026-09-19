@@ -29,4 +29,6 @@ export const PASSKEY_ERRORS = {
    */
   conflict: "操作が競合しました。もう一度お試しください。",
   configMissing: "パスキーの設定（RP_ID / RP_ORIGIN）がサーバー側で未設定です。",
+  /** セッションはあるが利用者の行が無い（アカウントが削除された後のセッションなど） */
+  accountNotFound: "アカウントが見つかりません。ログインし直してください。",
 } as const;

@@ -1,4 +1,4 @@
-import type { Credential, PrismaClient } from "@/generated/prisma/client";
+import type { Credential, Prisma, PrismaClient } from "@/generated/prisma/client";
 
 import {
   getCredentialDeleteBlockedReason,
@@ -39,17 +39,28 @@ export async function listCredentials(
   });
 }
 
+/** 資格情報と、その持ち主の WebAuthn ユーザーID */
+export type CredentialWithOwner = Credential & {
+  user: { webauthnUserId: string };
+};
+
 /**
  * 認証器が返した資格情報ID（base64url）で1件引く。無ければ null。
  *
  * **userId を取らない例外。** ログインの時点では持ち主が分からないため。
  * 戻り値の userId が、認証成功後にセッションを発行する相手になる。
+ *
+ * 持ち主の webauthnUserId を一緒に返す。ログイン応答の userHandle と照合するため
+ * （docs/steps/pub-2.md 設計判断 4）。**検索の条件は資格情報IDのまま。**
  */
 export async function findCredentialByCredentialId(
   client: PrismaClient,
   credentialId: string,
-): Promise<Credential | null> {
-  return client.credential.findUnique({ where: { credentialId } });
+): Promise<CredentialWithOwner | null> {
+  return client.credential.findUnique({
+    where: { credentialId },
+    include: { user: { select: { webauthnUserId: true } } },
+  });
 }
 
 export type CreateCredentialInput = {
@@ -68,9 +79,15 @@ export type CreateCredentialInput = {
   deviceName: string;
 };
 
-/** その利用者のパスキーとして追加する。同じ資格情報IDが登録済みなら（誰のものでも）拒否する */
+/**
+ * その利用者のパスキーとして追加する。同じ資格情報IDが登録済みなら（誰のものでも）拒否する。
+ *
+ * client はトランザクション内の tx でもよい（サインアップでユーザー作成と同じトランザクションに入れるため。
+ * src/lib/users.ts の createUserWithPasskey）。tx で重複（P2002）になったときは、
+ * 呼び出し側がトランザクションごと戻すこと。
+ */
 export async function createCredential(
-  client: PrismaClient,
+  client: Prisma.TransactionClient,
   userId: UserId,
   input: CreateCredentialInput,
 ): Promise<PasskeyResult<Credential>> {

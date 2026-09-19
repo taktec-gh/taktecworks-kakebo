@@ -98,15 +98,39 @@ describe("listCredentials", () => {
 });
 
 describe("findCredentialByCredentialId（userId を取らない例外: ログイン時点では持ち主が分からない）", () => {
-  it("credentialId で findUnique する", async () => {
+  it("credentialId で findUnique する。持ち主の webauthnUserId を include する（設計判断 4）", async () => {
     const { client, findUnique } = createMockClient();
-    const credential = makeCredential();
+    const credential = { ...makeCredential(), user: { webauthnUserId: "owner-handle-1" } };
     findUnique.mockResolvedValue(credential);
 
     await expect(findCredentialByCredentialId(client, "credential-id-1")).resolves.toBe(
       credential,
     );
-    expect(findUnique).toHaveBeenCalledWith({ where: { credentialId: "credential-id-1" } });
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { credentialId: "credential-id-1" },
+      include: { user: { select: { webauthnUserId: true } } },
+    });
+  });
+
+  it("戻り値に持ち主の webauthnUserId が含まれる", async () => {
+    const { client, findUnique } = createMockClient();
+    findUnique.mockResolvedValue({
+      ...makeCredential(),
+      user: { webauthnUserId: "owner-handle-2" },
+    });
+
+    const result = await findCredentialByCredentialId(client, "credential-id-1");
+    expect(result?.user.webauthnUserId).toBe("owner-handle-2");
+  });
+
+  it("検索の条件は資格情報IDのまま（userId は取らない。Step 1 設計判断 6 の例外）", async () => {
+    const { client, findUnique } = createMockClient();
+    findUnique.mockResolvedValue(null);
+
+    await findCredentialByCredentialId(client, "credential-id-1");
+
+    const [args] = findUnique.mock.calls[0];
+    expect(args.where).toEqual({ credentialId: "credential-id-1" });
   });
 
   it("存在しなければ null", async () => {

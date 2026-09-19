@@ -1,11 +1,15 @@
 // Prisma schema
 // 参照: https://pris.ly/d/prisma-schema
 //
-// 仕様の出典: docs/features.md / docs/steps/step-2.md / docs/steps/pub-1.md
+// 仕様の出典: docs/features.md / docs/steps/step-2.md / docs/steps/pub-1.md / docs/steps/pub-2.md
 //
 // 共通規約
 // - 全データモデルに userId（User への参照、onDelete: Cascade）を持たせる。
-//   例外は LoginAttempt のみ（ログイン前＝誰か分からない時点の IP 単位の記録のため）。
+//   例外は2つ:
+//   - LoginAttempt（ログイン前＝誰か分からない時点の IP 単位の記録のため）
+//   - SignupEvent（サインアップのレート制限の記録。ユーザーに紐づけて Cascade にすると、
+//     アカウントを消すたびに記録も消え「作って消す」の繰り返しで制限を回避できるため。
+//     docs/steps/pub-2.md 設計判断 5）
 //   Budget / CategoryBudget も払い出し先・カテゴリ経由で持ち主が決まるが、直接 userId を持たせる
 //   （「全クエリの where に userId がある」という単純な規則にするため）
 // - 関連の持ち主は複合外部キー（[関連ID, userId] → 参照先の [id, userId]）で DB に強制する。
@@ -55,6 +59,11 @@ enum CostType {
 /// 削除すると全データがカスケード削除される。
 model User {
   id String @id @default(cuid())
+
+  /// WebAuthn のユーザーID（user handle）。32バイトの暗号学的乱数を base64url にした文字列。
+  /// 内部の id（cuid）を認証器へ渡さないため別に持つ。ログイン時に応答の userHandle と照合する
+  /// （docs/steps/pub-2.md 設計判断 3・4）。作るのは src/lib/webauthn-user-id.ts の generateWebauthnUserId だけ
+  webauthnUserId String @unique
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -267,5 +276,25 @@ model LoginAttempt {
 
   createdAt DateTime @default(now())
 
+  @@index([ipHash, createdAt])
+}
+
+/// サインアップの記録。サインアップのレート制限（IP 単位・全体）に使う（docs/steps/pub-2.md 設計判断 5）。
+///
+/// **userId を持たない2つ目のデータモデル**（LoginAttempt に続く例外）。
+/// ユーザーに紐づけて Cascade にすると、アカウントを消すたびに記録も消え、
+/// 「作って消す」を繰り返せば制限を回避できるため。
+///
+/// ユーザー作成と同じトランザクションで1件書くので、作られたアカウントの数と記録の数は一致する。
+/// LoginAttempt と同じく追記のみで updatedAt を持たない。
+model SignupEvent {
+  id String @id @default(cuid())
+
+  /// IP を AUTH_SECRET で HMAC-SHA256 したもの。生IPは保存しない
+  ipHash String
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
   @@index([ipHash, createdAt])
 }

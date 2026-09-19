@@ -10,7 +10,6 @@ import { createCredential, deleteCredential, listCredentials } from "@/lib/crede
 import {
   getRpConfig,
   PASSKEY_ERRORS,
-  PASSKEY_USER_NAME,
   toAuthenticatorTransports,
   validateCredentialId,
   validateDeviceName,
@@ -20,6 +19,8 @@ import {
 import { consumeChallengeCookie, setChallengeCookie } from "@/lib/passkey-session";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/session";
+import { findWebauthnUserId } from "@/lib/users";
+import { getPasskeyDisplayName, webauthnUserIdToBytes } from "@/lib/webauthn-user-id";
 
 import { PASSKEYS_PATH, type PasskeyActionState } from "./action-state";
 
@@ -56,12 +57,20 @@ export async function startPasskeyRegistrationAction(): Promise<PasskeyRegistrat
     return { ok: false, error: PASSKEY_ERRORS.configMissing };
   }
 
+  // user handle はそのユーザーの webauthnUserId（毎回新しく作らない）。
+  // 同じ利用者の2本目以降のパスキーが、認証器から同じアカウントに見えるようにする（pub-2.md 設計判断 3・7）
+  const webauthnUserId = await findWebauthnUserId(prisma, userId);
+  if (!webauthnUserId) return { ok: false, error: PASSKEY_ERRORS.accountNotFound };
+  const displayName = getPasskeyDisplayName(webauthnUserId);
+
   const existing = await listCredentials(prisma, userId);
 
   const options = await generateRegistrationOptions({
     rpName: rpConfig.rpName,
     rpID: rpConfig.rpID,
-    userName: PASSKEY_USER_NAME,
+    userID: webauthnUserIdToBytes(webauthnUserId),
+    userName: displayName,
+    userDisplayName: displayName,
     attestationType: "none",
     excludeCredentials: existing.map((credential) => ({
       id: credential.credentialId,

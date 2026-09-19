@@ -502,4 +502,24 @@ describe("isPublicPath", () => {
   it("空文字は false", () => {
     expect(isPublicPath("")).toBe(false);
   });
+
+  describe("/signup（docs/steps/pub-2.md 設計判断 6。完全一致だけで公開する）", () => {
+    it('"/signup" は公開', () => {
+      expect(isPublicPath("/signup")).toBe(true);
+    });
+
+    it("接頭辞一致で広げない: /signupx・/signup-admin・/signup/foo は公開でない", () => {
+      // 変異テスト#10（isPublicPath で /signup を startsWith にする）が入ると
+      // これらが true になってしまうため、必ず false であることを確認する
+      expect(isPublicPath("/signupx")).toBe(false);
+      expect(isPublicPath("/signup-admin")).toBe(false);
+      expect(isPublicPath("/signup/")).toBe(false);
+      expect(isPublicPath("/signup/foo")).toBe(false);
+    });
+
+    it("大文字小文字を区別する", () => {
+      expect(isPublicPath("/SIGNUP")).toBe(false);
+      expect(isPublicPath("/Signup")).toBe(false);
+    });
+  });
 });

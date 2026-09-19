@@ -10,9 +10,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createChallengeToken } from "@/lib/passkey";
+import { createChallengeToken, createSignupChallengeToken } from "@/lib/passkey";
 
 const SECRET = "test-auth-secret-0123456789abcdef";
+// 32バイトの手元生成済み固定値（node -e "Buffer.from([1..32]).toString('base64url')"）
+const WEBAUTHN_USER_ID = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
 
 type StoredCookie = { name: string; value: string; options?: Record<string, unknown> };
 const store = new Map<string, StoredCookie>();
@@ -31,9 +33,13 @@ vi.mock("next/headers", () => ({
   }),
 }));
 
-const { setChallengeCookie, consumeChallengeCookie, clearChallengeCookie } = await import(
-  "@/lib/passkey-session"
-);
+const {
+  setChallengeCookie,
+  consumeChallengeCookie,
+  clearChallengeCookie,
+  setSignupChallengeCookie,
+  consumeSignupChallengeCookie,
+} = await import("@/lib/passkey-session");
 
 beforeEach(() => {
   store.clear();
@@ -98,6 +104,63 @@ describe("consumeChallengeCookie（単回性）", () => {
     await expect(consumeChallengeCookie("register")).resolves.toBe("REG-CHALLENGE");
     // register を消費しても authenticate 側は残っている
     await expect(consumeChallengeCookie("authenticate")).resolves.toBe("AUTH-CHALLENGE");
+  });
+});
+
+describe("setSignupChallengeCookie / consumeSignupChallengeCookie（docs/steps/pub-2.md 設計判断 2）", () => {
+  it("kakeibo_passkey_signup にチャレンジと webauthnUserId をまとめて載せ、往復できる", async () => {
+    await setSignupChallengeCookie("CHALLENGE", WEBAUTHN_USER_ID);
+
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    const [name, , options] = setSpy.mock.calls[0];
+    expect(name).toBe("kakeibo_passkey_signup");
+    expect(options).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/", maxAge: 120 });
+
+    await expect(consumeSignupChallengeCookie()).resolves.toEqual({
+      challenge: "CHALLENGE",
+      webauthnUserId: WEBAUTHN_USER_ID,
+    });
+  });
+
+  it("1回消費すると2回目は null（単回性）", async () => {
+    await setSignupChallengeCookie("CHALLENGE", WEBAUTHN_USER_ID);
+    await consumeSignupChallengeCookie();
+    await expect(consumeSignupChallengeCookie()).resolves.toBeNull();
+  });
+
+  it("検証前に Cookie を削除する（失敗するケースでも Cookie が残らない）", async () => {
+    // 設定画面の登録用チャレンジを signup の Cookie 名に紛れ込ませた状況（sub 違いで検証は失敗する）
+    const token = await createChallengeToken("CHALLENGE", "register", SECRET);
+    store.set("kakeibo_passkey_signup", { name: "kakeibo_passkey_signup", value: token });
+
+    await expect(consumeSignupChallengeCookie()).resolves.toBeNull();
+    expect(deleteSpy).toHaveBeenCalledWith("kakeibo_passkey_signup");
+    expect(store.has("kakeibo_passkey_signup")).toBe(false);
+  });
+
+  it("Cookie が無ければ null", async () => {
+    await expect(consumeSignupChallengeCookie()).resolves.toBeNull();
+  });
+
+  it("register/authenticate の Cookie とは独立している（同時に発行しても互いに影響しない）", async () => {
+    await setChallengeCookie("register", "REG-CHALLENGE");
+    await setChallengeCookie("authenticate", "AUTH-CHALLENGE");
+    await setSignupChallengeCookie("SIGNUP-CHALLENGE", WEBAUTHN_USER_ID);
+
+    await expect(consumeSignupChallengeCookie()).resolves.toEqual({
+      challenge: "SIGNUP-CHALLENGE",
+      webauthnUserId: WEBAUTHN_USER_ID,
+    });
+    // signup を消費しても register/authenticate 側は残っている
+    await expect(consumeChallengeCookie("register")).resolves.toBe("REG-CHALLENGE");
+    await expect(consumeChallengeCookie("authenticate")).resolves.toBe("AUTH-CHALLENGE");
+  });
+
+  it("サインアップ用チャレンジトークンを register/authenticate として消費しようとしても失敗する（Cookie名が別なので混入しない前提だが、念のため sub の分離も確認）", async () => {
+    const token = await createSignupChallengeToken("CHALLENGE", WEBAUTHN_USER_ID, SECRET);
+    store.set("kakeibo_passkey_register", { name: "kakeibo_passkey_register", value: token });
+
+    await expect(consumeChallengeCookie("register")).resolves.toBeNull();
   });
 });
 

@@ -2,6 +2,7 @@ import { SignJWT, jwtVerify } from "jose";
 
 import { SESSION_JWT_ALG } from "@/lib/auth";
 import { DEVICE_NAME_MAX_LENGTH, PASSKEY_ERRORS } from "@/lib/passkey-messages";
+import { isValidWebauthnUserId } from "@/lib/webauthn-user-id";
 
 import type {
   AuthenticatorTransportFuture,
@@ -26,22 +27,32 @@ import type {
 /** RP の表示名。ブラウザの登録ダイアログに出る。秘密ではないので定数でよい */
 export const RP_NAME = "家計簿";
 
-/**
- * WebAuthn の利用者名。単一ユーザー版からの固定値。
- * ユーザーごとのランダム化は後の Step（docs/steps/pub-1.md「含めない」）。
+/*
+ * WebAuthn の利用者名（userName / userDisplayName）は固定値ではなく、ユーザーごとの
+ * webauthnUserId から作る（src/lib/webauthn-user-id.ts の getPasskeyDisplayName。
+ * docs/steps/pub-2.md 設計判断 3）。
  */
-export const PASSKEY_USER_NAME = "owner";
 
-/** チャレンジ JWT の sub。用途（登録 / 認証）の取り違えを防ぐ */
+/**
+ * チャレンジ JWT の sub。用途の取り違えを防ぐ。
+ *
+ * - register: 設定画面での追加登録（ログイン中の利用者に紐づく）
+ * - authenticate: ログイン
+ * - signup: サインアップ（まだ利用者がいない。webauthnUserId を一緒に運ぶ）
+ *
+ * 3つとも別の値にし、検証で一致を要求する（docs/steps/pub-2.md 設計判断 2）。
+ */
 export const REGISTER_CHALLENGE_SUBJECT = "passkey-register";
 export const AUTH_CHALLENGE_SUBJECT = "passkey-auth";
+export const SIGNUP_CHALLENGE_SUBJECT = "passkey-signup";
 
 /** チャレンジの有効期間（秒）。単回・短命であること自体が防御になる */
 export const CHALLENGE_MAX_AGE_SECONDS = 120;
 
-/** チャレンジを格納する Cookie 名。登録用と認証用を混ぜない */
+/** チャレンジを格納する Cookie 名。登録用・認証用・サインアップ用を混ぜない */
 export const REGISTER_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_register";
 export const AUTH_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_auth";
+export const SIGNUP_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_signup";
 
 /**
  * 端末名の最大文字数と画面文言の実体は src/lib/passkey-messages.ts にある
@@ -50,7 +61,13 @@ export const AUTH_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_auth";
  */
 export { DEVICE_NAME_MAX_LENGTH, PASSKEY_ERRORS } from "@/lib/passkey-messages";
 
-/** チャレンジの用途 */
+/**
+ * チャレンジの用途（登録 / 認証）。
+ *
+ * サインアップ用はここに含めない。サインアップのチャレンジは webauthnUserId を必ず伴うため、
+ * 専用の createSignupChallengeToken / verifySignupChallengeToken だけで扱う
+ * （汎用の関数で webauthnUserId の無いサインアップ用トークンを作れないようにする）。
+ */
 export type ChallengePurpose = "register" | "authenticate";
 
 export type EnvSource = Record<string, string | undefined>;
@@ -257,6 +274,82 @@ export async function verifyChallengeToken(
     const challenge = payload.challenge;
     if (typeof challenge !== "string" || challenge.length === 0) return null;
     return challenge;
+  } catch {
+    return null;
+  }
+}
+
+/** サインアップ用チャレンジの中身 */
+export type SignupChallenge = {
+  challenge: string;
+  /**
+   * 開始時にサーバーが作った WebAuthn のユーザーID。完了時にこの値でユーザーを作る。
+   * **登録応答やフォームからは受け取らない**（docs/steps/pub-2.md 設計判断 2）
+   */
+  webauthnUserId: string;
+};
+
+/**
+ * サインアップ用チャレンジを署名付きトークンに包む。チャレンジと webauthnUserId を一緒に入れる。
+ *
+ * sub は SIGNUP_CHALLENGE_SUBJECT。設定画面の登録用・ログイン用とは別の値なので、
+ * 取り違えたトークンはどちらの検証にも通らない。
+ *
+ * @throws secret が空文字の場合 Error("AUTH_SECRET is not set")
+ * @throws webauthnUserId の形式が不正な場合 Error
+ */
+export async function createSignupChallengeToken(
+  challenge: string,
+  webauthnUserId: string,
+  secret: string,
+  options: CreateChallengeTokenOptions = {},
+): Promise<string> {
+  const key = toKey(secret);
+  if (!isValidWebauthnUserId(webauthnUserId)) {
+    throw new Error("invalid webauthnUserId");
+  }
+  const issuedAt = Math.floor((options.now?.getTime() ?? Date.now()) / 1000);
+  const maxAge = options.maxAgeSeconds ?? CHALLENGE_MAX_AGE_SECONDS;
+
+  return new SignJWT({ challenge, webauthnUserId })
+    .setProtectedHeader({ alg: SESSION_JWT_ALG })
+    .setSubject(SIGNUP_CHALLENGE_SUBJECT)
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(issuedAt + maxAge)
+    .sign(key);
+}
+
+/**
+ * サインアップ用チャレンジトークンを検証し、チャレンジと webauthnUserId を返す。失敗時は null。
+ *
+ * null になるのは次の場合:
+ * - token が undefined / null / 空文字
+ * - 署名が不正・有効期限切れ（2分）・alg が HS256 以外
+ * - sub が SIGNUP_CHALLENGE_SUBJECT でない（設定画面の登録用・ログイン用・セッションを渡した）
+ * - challenge クレームが空でない文字列でない
+ * - webauthnUserId クレームが無い・形式が不正
+ *
+ * @throws secret が空文字の場合のみ Error("AUTH_SECRET is not set")
+ */
+export async function verifySignupChallengeToken(
+  token: string | undefined | null,
+  secret: string,
+  options: VerifyChallengeTokenOptions = {},
+): Promise<SignupChallenge | null> {
+  const key = toKey(secret);
+  if (typeof token !== "string" || token.length === 0) return null;
+
+  try {
+    const { payload } = await jwtVerify(token, key, {
+      algorithms: [SESSION_JWT_ALG],
+      subject: SIGNUP_CHALLENGE_SUBJECT,
+      currentDate: options.now,
+    });
+
+    const { challenge, webauthnUserId } = payload;
+    if (typeof challenge !== "string" || challenge.length === 0) return null;
+    if (!isValidWebauthnUserId(webauthnUserId)) return null;
+    return { challenge, webauthnUserId };
   } catch {
     return null;
   }

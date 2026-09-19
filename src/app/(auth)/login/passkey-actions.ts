@@ -20,6 +20,7 @@ import { consumeChallengeCookie, setChallengeCookie } from "@/lib/passkey-sessio
 import { prisma } from "@/lib/prisma";
 import { createSession } from "@/lib/session";
 import { brandUserIdFromTrustedSource } from "@/lib/user-id";
+import { userHandleMatches } from "@/lib/webauthn-user-id";
 
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
 
@@ -36,6 +37,9 @@ import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
  *
  * **セッションを発行する相手は、検証に通った資格情報の持ち主（Credential.userId）。**
  * 利用者IDをリクエスト（フォーム・URL・Cookie）から受け取らない。
+ *
+ * 応答の userHandle が資格情報の持ち主の webauthnUserId と一致しなければ失敗にする
+ * （docs/steps/pub-2.md 設計判断 4。失敗の文言・記録は他の失敗と同じ）。
  */
 
 /** 認証用オプションを作り、チャレンジを短命 Cookie に置く */
@@ -97,6 +101,14 @@ export async function verifyPasskeyLoginAction(
 
     const credential = await findCredentialByCredentialId(prisma, response.id);
     if (!credential) {
+      await recordFailure(ipHash);
+      return { ok: false, error: LOGIN_ERROR_MESSAGE };
+    }
+
+    // 応答の userHandle が、その資格情報の持ち主の webauthnUserId と一致すること
+    // （docs/steps/pub-2.md 設計判断 4）。allowCredentials を渡さないログインでは
+    // 認証器が必ず userHandle を返すので、無い・違うなら失敗にする
+    if (!userHandleMatches(response.response.userHandle, credential.user.webauthnUserId)) {
       await recordFailure(ipHash);
       return { ok: false, error: LOGIN_ERROR_MESSAGE };
     }
