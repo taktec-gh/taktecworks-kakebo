@@ -1,0 +1,18 @@
+# gitleaks の誤検出（テスト用の固定値）。値そのものは秘密ではない。
+# 2026-09-19 に全履歴をスキャンし、14件すべてが tests/ の固定値（パスキーのユーザーIDの例・CRON_SECRET の例）で、
+# .env の実際の値と一致しないことを確認した。新しい検出はここに足さず、まず中身を確認すること。
+
+e5a3d961e1aacb140d0cc073f597626d0aeb02d3:tests/app/data-isolation.test.ts:generic-api-key:213
+e5a3d961e1aacb140d0cc073f597626d0aeb02d3:tests/app/data-isolation.test.ts:generic-api-key:214
+641f5b61312ab4c6e9a572ead1091453295e5953:tests/app/api/cron/cleanup/route.test.ts:generic-api-key:27
+641f5b61312ab4c6e9a572ead1091453295e5953:tests/lib/cron-auth.test.ts:generic-api-key:27
+e5a3d961e1aacb140d0cc073f597626d0aeb02d3:tests/app/(auth)/recovery/actions.test.ts:generic-api-key:165
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/lib/passkey.test.ts:generic-api-key:43
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/lib/passkey.test.ts:generic-api-key:44
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/app/settings/passkeys/page.test.tsx:generic-api-key:26
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/app/settings/passkeys/page.test.tsx:generic-api-key:27
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/lib/passkey-session.test.ts:generic-api-key:17
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/lib/users.test.ts:generic-api-key:35
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/lib/users.test.ts:generic-api-key:36
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/app/settings/passkeys/actions.test.ts:generic-api-key:110
+c47ef3cbdbccfd8b06a43b52f4be839108eae2a4:tests/app/settings/passkeys/actions.test.ts:generic-api-key:111
