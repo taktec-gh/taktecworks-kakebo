@@ -307,3 +307,43 @@ design-decisions.md の未決事項「デモユーザーにパスキー登録を
 - ログアウトではデモユーザーを消さない
 - デモユーザーはパスキーを登録できない
 - サンプルデータは今日の日付から決まる純粋関数で作り、乱数を使わない
+
+---
+
+## 実装完了後の引き継ぎ（tester 向け）
+
+実装はコミット `3c67d75`。以下は implementer の完了レポートの要約。**シグネチャの正は実装のコード**なので、ずれていたらコードを読むこと。
+
+### モジュール構成
+
+| ファイル | 担当 |
+|---|---|
+| `src/lib/demo-data.ts` | 純粋関数。`buildDemoData(today: "YYYY-MM-DD")` → `DemoDataPlan`（`yearMonths` / `paymentSources`（現金以外の追加分）/ `budgets` / `categoryBudgets` / `incomes` / `expenses`。関連先は名前で参照）。`getDemoExpiresAt(now)`（秒に切り捨て＋24時間）、`getDemoSessionMaxAgeSeconds(expiresAt, now)`、`formatDemoExpiresAtLabel(expiresAt)`（JST）。定数 `DEMO_TTL_HOURS`（実体は demo-messages.ts）など |
+| `src/lib/demo-messages.ts` | `DEMO_ERRORS`、`DEMO_PASSKEY_BLOCKED_MESSAGE`、`DEMO_START_LABEL`、`DEMO_LOGIN_NOTICES`、`DEMO_LOGOUT_WARNING`、`DemoActionState` |
+| `src/lib/demo-limits.ts` | 1時間5件・24時間300件。`isDemoLimitReached`（純粋、`>=`）、`isDemoRateLimited`、`recordDemoEvent(tx, ipHash)`。`demoEvent` だけを数える |
+| `src/lib/demo-seed.ts` | `insertDemoData(tx, userId, plan, presets)`。名前を ID に解決して `createMany`。解決できなければ例外 |
+| `src/lib/users.ts` | `createDemoUser(client, { ipHash, now })` → `{ userId, demoExpiresAt }`（1トランザクション: User → プリセット → `insertDemoData` → `recordDemoEvent`）、`findDemoExpiresAt(client, userId)` |
+| `src/lib/session.ts` | `createSession(userId, options?: { maxAgeSeconds?, now? })`（**シグネチャ変更**。JWT の exp と Cookie の maxAge の両方に使う。省略時30日） |
+| `src/lib/cleanup.ts` | `expiredDemoUserWhere(now)` = `{ demoExpiresAt: { not: null, lt: now } }`、`deleteExpiredDemoUsers(client, now)`（findMany `take: 1000` → deleteMany。**両方に同じ条件**）、`deleteExpiredRecords(client, now)`（7日 / 7日 / 30日）、`runCleanup(client, now)` |
+| `src/lib/cron-auth.ts` | `getCronSecret(env)`（未設定・空は null）、`isAuthorizedCronRequest(authorization, secret)`（`"Bearer " + secret` とヘッダの SHA-256 同士を `timingSafeEqual`） |
+| `src/app/api/cron/cleanup/route.ts` | `GET`。認証失敗は 401・空本文、成功は 200 と件数4つの JSON、例外は 500・空本文 |
+| `src/lib/auth.ts` | `CRON_CLEANUP_PATH` を `PUBLIC_PATHS`（完全一致）に |
+| `src/app/(auth)/login/actions.ts` | `startDemoAction(): Promise<DemoActionState>`。**引数を宣言しない。** now → IP ハッシュ → レート制限（→ `rateLimited`）→ `createDemoUser` → `createSession(userId, { now, maxAgeSeconds })` → try の外で `redirect("/")`。例外は `unavailable` |
+| `src/app/(auth)/login/demo-start-button.tsx` | `DemoStartButton({ start })`（`useActionState`） |
+| `src/app/demo-banner.tsx` | `DemoBanner({ expiresAtLabel })`。`/` は `findDemoExpiresAt` が null でないときだけ出す |
+| `src/app/settings/passkeys/actions.ts` / `page.tsx` | start / finish は `requireUserId()` の直後に `findDemoExpiresAt` を見て、デモなら `DEMO_PASSKEY_BLOCKED_MESSAGE`。画面は登録フォーム・表示名・別端末の案内の代わりに説明を出す |
+
+### 仕様から補足・判断した点
+
+- デモの予算は 現金 30,000 / Aカード 70,000 / A銀行 90,000。A銀行は1日に家賃 75,000 を落とすので、月初から「超過」か「要注意」になる
+- 浪費は1日にコンビニの支出を「浪費」で入れる。前月比は「医療」（今月と2か月前だけ）で増える
+- implementer が手元で 2026-01-01〜2028-12-31 の全日付について「今日の日付によらず成り立つこと」1〜5 を検算済み（スクリプトはリポジトリに無い）
+- 期限がちょうど `now` のデモは消さない（`lt`）
+- `vercel.json` の書式と `CRON_SECRET` の Bearer ヘッダは Vercel の公式文書で確認済み（2026-09-19）
+
+### 実装完了時点のテスト結果
+
+`Tests 39 failed | 1765 passed (1804)`:
+`tests/app/data-isolation.test.ts`（表に `startDemoAction` が無い）、
+`tests/app/page.test.tsx` 12件（prisma モックに `user` が無い。ページが `findDemoExpiresAt` を呼ぶため）、
+`tests/app/settings/passkeys/actions.test.ts` 21件・`page.test.tsx` 5件（`@/lib/users` のモックに `findDemoExpiresAt` が無い）。
