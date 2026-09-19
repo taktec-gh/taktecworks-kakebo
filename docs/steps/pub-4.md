@@ -211,7 +211,12 @@ Chrome で `http://localhost:3000` を開き、**DevTools の Console を開い�
 4. ログアウトしてサインアップ、パスキーでログイン（Windows Hello が出て通る）
 5. DevTools の Network で任意のページを選び、Response Headers に CSP と設計判断 4 のヘッダーがあること
 
+### 実機確認の結果（2026-09-19、Windows・Chrome、`next build` → `next start`）
+
+1〜5 すべて OK（CSP の違反なし、予算バーの幅、フォームの送信、サインアップとパスキーのログイン、レスポンスヘッダー）。自前の 404 画面も表示を確認。
+
 **後片付け**: 確認で作ったユーザーとデモは、利用者の同意を得てから DB から消す。サーバーを止める。
+（2026-09-19 に通常ユーザー1人・デモユーザー1人と、記録（SignupEvent / DemoEvent / LoginAttempt 各1件）を削除。全テーブル0件）
 
 ---
 
@@ -230,7 +235,7 @@ Chrome で `http://localhost:3000` を開き、**DevTools の Console を開い�
 
 ## この Step で決まること
 
-完了後に design-decisions.md へ移す。
+> **2026-09-19 に [design-decisions.md](../design-decisions.md)「9. セキュリティヘッダーで決めたこと」へ移した。** 以下は指示書を書いた時点の一覧。
 
 - CSP は nonce 方式で proxy が生成する。本番に `'unsafe-inline'` / `'unsafe-eval'` を入れない。開発だけ緩める判定は `=== "development"`
 - `upgrade-insecure-requests` は入れない（HSTS と Vercel の https 強制で足りる）
