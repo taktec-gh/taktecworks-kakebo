@@ -236,3 +236,43 @@ Step 2 で「独立した Step に分け、削れる形にしておく」とし�
 - リカバリー中は専用の短命トークン（typ で区別、10分）で、パスキーの登録しかできない
 - 古いパスキーは自動で消さない
 - コードは設定から作り直せる。作り直しの前の再認証はセッションの個別失効と一緒に考える
+
+---
+
+## 実装完了後の引き継ぎ（tester 向け）
+
+実装はコミット `f6372db`。以下は implementer の完了レポートの要約。**シグネチャの正は実装のコード**なので、ずれていたらコードを読むこと。
+
+### モジュール構成
+
+| ファイル | 担当 |
+|---|---|
+| `src/lib/recovery-code.ts` | 純粋関数（サーバー専用）。`RECOVERY_CODE_ALPHABET`（32文字、`#` を含む）/ `RECOVERY_CODE_LENGTH = 20`。`generateRecoveryCode()`（区切り無し20文字）、`formatRecoveryCode(code)`（5文字ずつハイフン）、`normalizeRecoveryCode(input: unknown): string \| null`（空白（全角含む `\s`）と ASCII ハイフンを除き、ASCII 英小文字だけ大文字に。20文字・許可文字のみ・100文字以下の入力でなければ null）、`hashRecoveryCode(code)`（正規化後の SHA-256 16進64文字。正規化できなければ例外）、`isRecoveryCodeHash(v)`、`issueRecoveryCode(): { code, hash }` |
+| `src/lib/recovery-messages.ts` | パス（`/recovery`、`/recovery/passkey`、完了後 `/`）、`RECOVERY_ERRORS`（`invalidCode` ほか）、`RECOVERY_REGENERATE_ERRORS`、`DEMO_RECOVERY_CODE_BLOCKED_MESSAGE`、`RecoveryCodeIssuedResult = { ok: true; recoveryCode } \| { ok: false; error }` |
+| `src/lib/auth.ts` | `RECOVERY_JWT_TYP = "kakebo-recovery+jwt"`、`RECOVERY_TOKEN_MAX_AGE_SECONDS = 600`、`RECOVERY_COOKIE_NAME = "kakeibo_recovery"`。`createRecoveryToken(secret, { userId, codeHash }, { now? })`、`verifyRecoveryToken(token, secret, { now? })` → `{ userId: UserId, codeHash, iat, exp } \| null`（typ 一致・`maxTokenAge` 600・`codeHash` の形を要求）、`getRecoveryCookieOptions`。`/recovery`・`/recovery/passkey` を `PUBLIC_PATHS` に完全一致で |
+| `src/lib/passkey.ts` | `ChallengePurpose` に `"recovery"`（sub `passkey-recovery`、Cookie `kakeibo_passkey_recovery`） |
+| `src/lib/recovery-session.ts` | `setRecoveryCookie` / `getRecoverySession`（消費しない）/ `clearRecoveryCookie` |
+| `src/lib/recovery-codes.ts` | `findRecoveryUserIdByCodeHash(client, hash)`（`where: { recoveryCodeHash, demoExpiresAt: null }`。形が不正なら DB を呼ばず null）、`completeRecoveryWithPasskey(client, { userId, expectedCodeHash, newCodeHash, credential })` → `{ ok: true } \| { ok: false; reason: "duplicate" \| "codeNotCurrent" }`、`regenerateRecoveryCodeHash(client, userId, newHash): Promise<boolean>`、`hasRecoveryCode(client, userId)` |
+| `src/lib/users.ts` | `CreateUserWithPasskeyInput` に `recoveryCodeHash`（必須。形が不正ならトランザクション前に例外） |
+| `src/lib/server-action-request.ts` | `isServerActionRerender()`（`next-action` ヘッダの有無） |
+| `src/app/(auth)/recovery/actions.ts` | `verifyRecoveryCodeAction(prev, formData)`、`startRecoveryPasskeyRegistrationAction()`、`finishRecoveryPasskeyRegistrationAction(response, deviceName)` |
+| `src/app/(auth)/signup/actions.ts` | `finishSignupAction` の戻り値が `RecoveryCodeIssuedResult`（**型の変更**） |
+| `src/app/settings/passkeys/actions.ts` | `regenerateRecoveryCodeAction(): Promise<RecoveryCodeIssuedResult>` |
+| `src/components/recovery-code-display.tsx` | `RecoveryCodeDisplay({ code, lead?, notice?, continueLabel, onContinue, copy?, canCopy? })`。コードは `[data-testid="recovery-code"]`。「控えました」のチェックまで先へ進むボタンが disabled |
+| 画面 | `SignupForm`（`onSuccess` は「控えました」の後。props に `intro?` / `footer?`）、`RecoveryCodeForm({ verify })`、`RecoveryPasskeyForm(...)`、`RecoveryCodeSection({ hasCode, regenerate })`、ログイン画面のリンク |
+
+### 処理の要点
+
+- `verifyRecoveryCodeAction`: IP ハッシュ → `isBlocked`（制限中は失敗を記録して弾く）→ 正規化 → ハッシュ → 探索 → 成功を記録 → `setRecoveryCookie` → `redirect("/recovery/passkey")`。**失敗はすべて `RECOVERY_ERRORS.invalidCode`**（IP・DB の例外を含む）。コードは消費しない
+- `finishRecoveryPasskeyRegistrationAction`: チャレンジ消費 → トークン（無ければ `sessionExpired`）→ … → `verifyRegistrationResponse` → `issueRecoveryCode` → `completeRecoveryWithPasskey`。`duplicate` はトークンを残す、`codeNotCurrent` はトークンを消して `invalidCode`。成功で `clearRecoveryCookie()` → `createSession(トークンの userId)` → `{ ok: true, recoveryCode }`
+- `completeRecoveryWithPasskey` のトランザクション: **差し替え（`updateMany({ where: { id: userId, recoveryCodeHash: expectedCodeHash } })`、count が1でなければ例外）→ `createCredential(tx, ...)` の順。**
+  指示書の順（資格情報 → 差し替え）から逆にした。資格情報の INSERT が User 行に共有ロックを取り、一意索引の列の UPDATE と衝突して、同じコードの同時実行でデッドロックになったため（実DBで確認）
+- `/signup` と `/recovery/passkey` のページは、**Server Action の後の再描画（`next-action` ヘッダあり）のときだけ redirect しない。** Cookie を書き換えた Server Action の後の再描画で redirect すると、一度しか出さないコードが表示されずに消えるため。ヘッダは認可には使っていない
+
+### 実装完了時点のテスト結果
+
+`Tests 20 failed | 2906 passed (2926)`:
+`data-isolation.test.ts`（新しい4つの Server Action の行が無い）、`users.test.ts` 5件（`recoveryCodeHash` が必須に）、
+`signup/actions.test.ts` 2件（戻り値に `recoveryCode`）、`signup/page.test.tsx` 2件（注意書きの文言、`next/headers` のモックが要る）、
+`signup-form.test.tsx` 1件（`onSuccess` は「控えました」の後）、`settings/passkeys/page.test.tsx` 9件（モックの prisma に `user` が無い）。
+`npx tsc --noEmit` のエラーは `tests/` の15件のみ。
