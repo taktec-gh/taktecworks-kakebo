@@ -109,11 +109,11 @@ Step 単位で進め、**実装とテストを別のエージェントが担当�
   `prisma migrate` でエンジンが要る場合は利用者に承認を確認する（勝手に承認しない）
 - **`DATABASE_URL` のホストは `localhost` ではなく `127.0.0.1`。**`localhost` が IPv6 の `::1` に解決され、
   IPv4 だけに公開した Docker のポートに届かず P1001 になる
-- **この環境では、PC → Docker の DB へ送るデータが約1.3KBを超えると止まる**（2026-09-19 に確認）。
-  - 1,200バイトのクエリは通り、1,400バイト以上は応答が無い（Node の `pg` で直接送っても同じ）。DB → PC 方向は1MBでも通る
-  - DB側には何も届かず、ログも残らない。Prisma では約20秒後に P1017（Server has closed the connection）になる。
-    原因は Docker Desktop のポート転送か経路の MTU と見ているが、**未解決**
-  - **`prisma migrate dev` と、DBと比較する `migrate diff` が使えない**（列の一覧を取る約2KBのクエリで止まる）。
-    回避策は、`prisma migrate diff --from-schema <旧> --to-schema prisma/schema.prisma --script` で DB を使わずに SQL を作り、
-    読んで確認してから `prisma migrate deploy` で当てること（Step 1 はこの方法で行った）
-  - **アプリの動作確認でも、長いメモなど大きな書き込みで固まるはず。** 実機確認で固まったら、まずこれを疑う
+- **WSL のミラーモード（`.wslconfig` の `networkingMode=mirrored`）では、PC → Docker の DB が大きな送信で固まる**（2026-09-19 に原因を特定し、ミラーモードを外して解決）
+  - 症状：1,400バイト（TCP のデータで1,360バイト）を超えるパケットが黙って捨てられる。DB には何も届かずログも残らない。
+    Prisma では約20秒後に P1017（Server has closed the connection）。`prisma migrate dev` と DB と比較する `migrate diff` が使えず、
+    アプリでも長いメモなどの大きな書き込みで固まる
+  - 見分け方：ミラーモードでは、PC の `127.0.0.1:5433` を待ち受ける Windows のプロセスが無い（WSL が直接つなぐ）。
+    正常時は `com.docker.backend` が待ち受ける（`Get-NetTCPConnection -LocalPort 5433 -State Listen`）
+  - Docker の `daemon.json` の `"mtu"` は無関係だった（外しても直らなかった）
+  - **ミラーモードに戻したら再発する。** P1001 / P1017 や、大きな書き込みでの無応答が出たら、まず `.wslconfig` を確認する
