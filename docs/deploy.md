@@ -1,90 +1,218 @@
-# デプロイと復旧の手順
+# デプロイと運用の手順（公開版）
 
-> **この文書は単一ユーザー版（非公開）のデプロイ記録を、個人情報を除いて残したもの。**
-> 公開版のデプロイ手順は公開時に書き直す。パスワードログインと `RECOVERY_MODE` は公開版では廃止する
-> （[design-decisions.md](./design-decisions.md)）。URLは `<project>` などのプレースホルダに置き換えてある。
+公開版を Vercel（Hobby プラン）と Neon（無料プラン）に初めてデプロイする手順と、その後の運用。
+単一ユーザー版の記録（パスワードログインと `RECOVERY_MODE` の緊急脱出）は公開版では使わないので書き直した。
 
-**この文書はアプリから締め出された状態で読むためのもの。** アプリの中に置いても意味がないので、
-リポジトリ（GitHub）に置いてある。スマホでも PC でも、GitHub が開ければ読める。
+- 決定日：2026-09-19
+- **プロジェクト名：`taktecworks-kakebo`** → 本番URL `https://taktecworks-kakebo.vercel.app`
+- **Vercel は Hobby（無料）プランで使う。** 商用利用の扱いについては [design-decisions.md](./design-decisions.md)「5. ドメイン」の記録を参照
+
+> **秘密の値（接続文字列・`AUTH_SECRET`・`CRON_SECRET`）はこの文書・チャット・コミットに書かない。**
+> ダッシュボードとパスワードマネージャーの中だけで扱う。
 
 ---
 
-## 本番URL
+## 全体の順序
 
-**https://<project>.vercel.app**
+| # | 作業 | 誰が | 戻せるか |
+|---|---|---|---|
+| 1 | push の前の確認 | Claude | — |
+| 2 | GitHub に**非公開**のリポジトリを作って push | 利用者 | 戻せる（非公開のまま） |
+| 3 | Neon に本番用の DB を**新しく**作る | 利用者 | 戻せる |
+| 4 | 本番 DB にマイグレーションを適用する | 利用者 | 戻しにくい（スキーマが作られる） |
+| 5 | Vercel でプロジェクトを作り、環境変数を入れてデプロイ | 利用者 | 戻せる |
+| 6 | **本番URLが `taktecworks-kakebo.vercel.app` になったか確かめる** | 利用者 | — |
+| 7 | 動作確認（持ち越し項目を含む） | 利用者＋Claude | — |
+| 8 | リポジトリを**公開**に切り替える | 利用者 | **戻せない**（一度公開した内容は複製されうる） |
 
-希望したプロジェクト名が**他人の別プロジェクト**にすでに取られていると、Vercel は別名を割り当てる。
-プロジェクト名から推測して打ち込むと他人のサイトに着くので注意。
+**8 は最後にする。** 1〜7 で問題が出たら、公開の前に直せる。
 
-### 使ってはいけないURL
+---
+
+## 1. push の前の確認
+
+- [x] `gitleaks git .` で履歴全体をスキャン（2026-09-19。テスト用の固定値の誤検出14件を `.gitleaksignore` で除外し、検出0件）
+- [x] `.env` が `.gitignore` に入っていて、追跡しているのは `.env.example`（値は空）だけ
+- [x] `next.config.ts` に手元の LAN の IP を直書きしていない（`DEV_ALLOWED_ORIGINS` に移した）
+- [x] コミットの作者のメールアドレスは公開してよい（利用者が確認済み）
+- [x] push の直前に `npx vitest run`（3162件）/ `npx tsc --noEmit` / `npm run lint`（エラー0）/ `npm run build` が通る（2026-09-19）
+
+---
+
+## 2. GitHub に非公開で push する
+
+1. GitHub で新しいリポジトリを作る。**Visibility は Private。** README・`.gitignore`・ライセンスは付けない（手元の履歴と衝突するため）
+2. GitHub アカウントの**2要素認証**が有効か確かめる（公開後はリポジトリが攻撃の入口になりうる）
+3. 手元で:
+
+   ```powershell
+   git remote add origin https://github.com/<アカウント>/<リポジトリ名>.git
+   git push -u origin main
+   ```
+
+---
+
+## 3. Neon に本番用の DB を作る
+
+**単一ユーザー版の Neon プロジェクトを使わない。** 実データが入っている（CLAUDE.md「DB」）。
+
+1. Neon で**新しいプロジェクト**を作る
+   - リージョン: **AWS Asia Pacific (Tokyo)** を選べれば選ぶ（利用者も Vercel の関数も日本に近いほど速い）
+   - Postgres のバージョン: 既定でよい（ローカルは 17）
+2. 接続文字列を2つ控える（パスワードマネージャーへ。ここには書かない）
+   - **プール接続**（ホスト名に `-pooler` が付く）→ `DATABASE_URL`（アプリ実行時）
+   - **直接接続**（`-pooler` 無し）→ `DIRECT_URL`（マイグレーション用）
+3. **Neon の Vercel 連携（Integration）は使わない。** プレビュー用のブランチや環境変数を自動で作るため、「本番・プレビュー・開発で DB を分ける」管理と噛み合わない。環境変数は手で入れる
+
+---
+
+## 4. 本番 DB にマイグレーションを適用する
+
+**ビルドの中では適用しない**（下の「やってはいけない変更」）。手元から一度だけ適用する。
+
+`.env` は書き換えない。**PowerShell のそのウィンドウの中だけ**で接続先を差し替え、終わったら消す。
+`prisma.config.ts` は `dotenv` で `.env` を読むが、**すでにある環境変数は上書きしない**ので、シェルで入れた値が優先される。
+
+```powershell
+$env:DIRECT_URL = Read-Host "Neon の直接接続の文字列"   # 聞かれたら貼り付ける
+$env:DATABASE_URL = $env:DIRECT_URL
+npx prisma migrate status    # 接続先が Neon で、7件が未適用と出ることを確かめる
+npx prisma migrate deploy    # 7件を適用
+npx prisma migrate status    # "Database schema is up to date"
+Remove-Item Env:DIRECT_URL, Env:DATABASE_URL
+```
+
+- **接続文字列をコマンドに直接書かない。** PowerShell は打ったコマンドを履歴ファイル（`ConsoleHost_history.txt`）に平文で残す。`Read-Host` で聞かれて貼り付けた値は履歴に残らない
+- **`migrate status` の出力で接続先のホストが Neon であることを確かめてから** `deploy` する
+- **`prisma migrate reset` / `migrate dev` / `db push` を本番に対して実行しない**（CLAUDE.md「DB」）
+- `prisma/checks/` の検証スクリプトは、接続先がローカル以外だと何もせず終わる（本番では使えない。使わない）
+- Claude には接続文字列を渡さない。この手順は利用者が実行する
+
+---
+
+## 5. Vercel でプロジェクトを作る
+
+1. Vercel アカウントの**2要素認証**が有効か確かめる（環境変数を見られると全部の鍵が漏れる）
+2. Add New → Project → GitHub のリポジトリを Import
+3. **Project Name を `taktecworks-kakebo` にする**
+4. Framework Preset は Next.js（自動で選ばれる）。Build Command などは既定のまま
+5. **Environment Variables**（すべて **Production** だけ。Preview / Development には入れない）:
+
+   | キー | 値 | 備考 |
+   |---|---|---|
+   | `DATABASE_URL` | Neon の**プール接続** | `-pooler` 付き |
+   | `AUTH_SECRET` | **新しく作ったランダム文字列** | ローカルと別の値。作り方は `.env.example` |
+   | `CRON_SECRET` | **新しく作ったランダム文字列** | `AUTH_SECRET` と別の値 |
+   | `RP_ID` | `taktecworks-kakebo.vercel.app` | ホスト名だけ。`https://` もスラッシュも付けない |
+   | `RP_ORIGIN` | `https://taktecworks-kakebo.vercel.app` | スキームを含め、末尾にスラッシュを付けない |
+
+   - `DIRECT_URL` は Vercel には入れない（マイグレーションは手元から行う。`prisma generate` は DB に接続しない）
+   - `DEV_ALLOWED_ORIGINS` は入れない（開発専用）
+6. Deploy
+
+### 関数のリージョン
+
+Settings → Functions → Function Region を、Neon と同じ地域（**Tokyo, `hnd1`**）にできれば変える。
+DB と関数が離れていると、1回の画面表示で DB を何度も往復するたびに待ち時間が積み上がる。変えたら Redeploy。
+
+---
+
+## 6. 本番URLを確かめる（最重要）
+
+**パスキーは `RP_ID`（ホスト名）に結びつく。** 実際の本番URLが `RP_ID` と違うと、パスキーの登録もログインも失敗し、
+画面には一般的な失敗の文言しか出ないので原因が分からない（単一ユーザー版で実際に踏んだ）。
+
+1. Settings → Domains に **`taktecworks-kakebo.vercel.app`** があること
+2. 希望した名前が他人に取られていると、Vercel は**別の名前**を割り当てる。その場合は:
+   - 割り当てられた名前を本番URLとして使うか、Domains で別の `*.vercel.app` を足して決める
+   - `RP_ID` / `RP_ORIGIN` をその名前に直して **Redeploy**
+   - この文書・CLAUDE.md・design-decisions.md のプロジェクト名を直す
+3. **最初にパスキーを登録する前に確定する。** 登録してから変えると、そのパスキーは全部使えなくなる
+
+### 使ってはいけない URL
 
 | URL | 何か | なぜ駄目か |
 |---|---|---|
-| `<取られていた名前>.vercel.app` | **他人の別プロジェクト** | 無関係のサイト |
-| `<project>-<team>.vercel.app` | デプロイURL | Vercel SSO の後ろ。`RP_ID` と一致せずパスキーが失敗する |
-| `<project>-<ハッシュ>-<team>.vercel.app` | デプロイ固有URL | 同上。**ハッシュはデプロイのたびに変わる** |
+| `taktecworks-kakebo-<team>.vercel.app` | デプロイURL | `RP_ID` と一致せずパスキーが失敗する |
+| `taktecworks-kakebo-<ハッシュ>-<team>.vercel.app` | デプロイ固有URL | 同上。ハッシュはデプロイのたびに変わる |
 
-**パスキーはオリジン（ホスト名）に紐づく。** ホスト名が `RP_ID` と一致しないと、ブラウザは
-パスキーの選択ダイアログを出す前に拒否する。アプリ側はその例外を捕まえて
-「ログインできませんでした。パスワードを確認してください。」に落とすため、
-**画面からは原因が分からない**。パスキーが出てこないときは、まずURLを疑うこと。
+閲覧者に渡すのは本番URLだけにする。
 
 ---
 
-## Vercel の環境変数
+## 7. 動作確認
 
-Production スコープに設定する。**`.env` ファイルは Vercel には置かない**（`.gitignore` 済みで、
-そもそもリポジトリに入らない）。値はダッシュボードの Environment Variables で管理する。
+本番URLで行う。**DevTools の Console を開いたまま**（CSP の違反が出ないこと）。
 
-| キー | 役割 | 備考 |
-|---|---|---|
-| `DATABASE_URL` | アプリ実行時の DB 接続 | Neon の**プール接続**（`-pooler` 付き） |
-| `DIRECT_URL` | マイグレーション用の DB 接続 | 非プール接続。schema engine が必要とする |
-| `APP_PASSWORD` | パスワードログイン | **32文字以上のランダム文字列**。パスワードマネージャに保管する |
-| `AUTH_SECRET` | セッション JWT の署名 / チャレンジの署名 / IP の HMAC | **ローカルとは別の値**にする |
-| `RP_ID` | パスキーの RP ID | `<project>.vercel.app`（**ホスト名のみ**。`https://` もポートも付けない） |
-| `RP_ORIGIN` | パスキーで許可するオリジン | `https://<project>.vercel.app`（スキームを含む） |
-| `RECOVERY_MODE` | 締め出しからの緊急脱出 | **通常は設定しない。**未設定が正常 |
+### 基本
+
+1. ログイン画面が出る。「デモで試す」でダッシュボードが開き、サンプルデータが出る
+2. サインアップ → リカバリーコードの表示 → パスキーでログイン
+3. `/recovery` でリカバリーコードから戻れる
+4. `curl.exe -I https://taktecworks-kakebo.vercel.app/login` で、CSP・HSTS・X-Frame-Options などが付き、`X-Powered-By` が無い
+5. [securityheaders.com](https://securityheaders.com) で本番URLを採点する（Step 4 からの持ち越し）
+
+### 持ち越していた項目
+
+6. **スマホのパスキーでのクロスデバイス認証**（Step 2 から持ち越し）
+   - PC の設定画面で「この端末を登録」→ ブラウザの画面でスマホを選び、QR コードをスマホで読んでスマホにパスキーを作る
+   - ログアウト → PC で「パスキーでログイン」→ QR コード → スマホで認証してログインできる
+   - スマホ単体で本番URLを開き、スマホのパスキーでログインできる
+
+### 定期処理（Cron）
+
+7. Settings → Cron Jobs に `/api/cron/cleanup`（`0 18 * * *`）がある
+8. その画面の **Run** で手動実行し、ログ（View Logs）が 200 で、件数の JSON が返っている
+9. 環境変数の `CRON_SECRET` が入っていないと 401 になる（入れ忘れていないことの確認を兼ねる）
+
+### 後片付け
+
+確認で作ったアカウントは、設定画面からパスキーを消すだけでは消えない（アカウント削除の画面はまだ無い）。
+**本番 DB のデータを手で消す手段は作らない**（本番に対して SQL を実行する経路を増やさない）。確認用のアカウントはそのまま残してよい。
+デモアカウントは24時間後に Cron が消す。
+
+---
+
+## 8. リポジトリを公開する
+
+1〜7 がすべて済んでから行う。
+
+- [ ] もう一度 `gitleaks git .` で検出0件
+- [ ] README.md を公開版の説明に書き直した（今は単一ユーザー版の説明のまま）
+- [ ] GitHub の Settings → General → Danger Zone → Change visibility → **Public**
+
+---
+
+## デプロイの仕組み
+
+- GitHub の `main` に push すると Vercel が自動でビルド・デプロイする
+- `vercel.json` の `git.deploymentEnabled` で **`main` 以外のブランチはビルドしない。**
+  プレビューは `RP_ID` が一致せずパスキーが使えず、環境変数も入れていないので動かない。守りの薄い入口を増やさない
+- `vercel.json` の `crons` で、1日1回（UTC 18:00 = JST 3:00 ごろ。Hobby では1時間の幅でずれる）`/api/cron/cleanup` が呼ばれる
+- `/src/generated`（Prisma クライアント）は `.gitignore` 済み。`package.json` の `postinstall: prisma generate` が Vercel 側で生成する
+
+---
+
+## 運用
 
 ### 環境変数を変えたら必ず Redeploy する
 
-Vercel は**ビルド時**に環境変数を埋め込む。値を変えただけでは稼働中のデプロイに反映されない。
-Deployments → 最新のデプロイ → Redeploy を実行すること。
+Vercel の環境変数は、変えただけでは動いているデプロイに反映されない。Deployments → 最新 → Redeploy。
 
-「`RECOVERY_MODE=1` を入れたのに入れない」の原因はたいていこれ。
+### スキーマを変える Step
 
----
+1. ローカルでマイグレーションを作ってテストする（各 Step の手順どおり）
+2. `main` にマージする**前に**、手順 4 と同じ方法で本番 DB に `prisma migrate deploy` する
+   （コードを先にデプロイすると、新しい列を読むコードが古いスキーマで動いて失敗する）
+3. マージして push
 
-## 登録済みのパスキー
+### セッションを全部無効にしたいとき
 
-（登録端末の一覧は個人情報のため削除した。構成はスマホ1台＋PC1台。スマホは `hybrid` 対応なら PC の QR ログインにも使える）
+`AUTH_SECRET` を新しい値に変えて Redeploy する。全員のセッションが切れる。
 
-**2本以上を保つこと。** アプリ側にも「必須状態では最後の1本を削除できない」ガードがあるが、
-端末の故障・紛失に備えて、実際に使える端末を常に2つ以上持っておく。
-
----
-
-## 締め出されたときの復旧手順
-
-パスキーを登録した端末を全部失った場合。**2026-08-14 に実地で確認済み。**
-
-1. Vercel → Project → Settings → Environment Variables
-2. `RECOVERY_MODE` = `1` を **Production** スコープで追加
-3. Deployments → 最新 → **Redeploy**（これを忘れると反映されない）
-4. 本番URLに**パスワードでログイン**する
-5. `/settings/passkeys` で新しい端末のパスキーを登録する。**2本登録する**
-6. Vercel で `RECOVERY_MODE` を**削除**
-7. **もう一度 Redeploy**
-8. 別ブラウザ（未ログイン）で、パスワードだけでは入れないことを確認する
-
-### 手順6・7を絶対に忘れないこと
-
-`RECOVERY_MODE=1` が残っている間、**防御はパスワード1枚だけ**になる。
-サイトは公開されたままなので、この状態を放置しない。
-
-この方式が安全策として成立するのは、Vercel の環境変数を変更できるのが Vercel アカウントの
-保持者だけだから。つまり「パスキーを登録した端末」と「Vercel アカウント」の両方を同時に
-失わない限り締め出されない。**Vercel アカウント側の2要素認証を有効にしておくこと。**
+- **パスキーとリカバリーコードは消えない**（リカバリーコードは鍵を使わない SHA-256 で保存しているため、鍵の交換の影響を受けない。design-decisions.md 決定事項 10）
+- ログイン試行の IP のハッシュも変わるので、レート制限の数え直しが起きる（害は無い）
+- 個別のセッションだけを切る手段はまだ無い（design-decisions.md「残りの設計項目 > セッション」）
 
 ---
 
@@ -92,45 +220,16 @@ Deployments → 最新のデプロイ → Redeploy を実行すること。
 
 ### `RP_ID` を変える
 
-**登録済みのパスキーが全部使えなくなる。** パスキーはドメインに紐づいているため。
-
-独自ドメインへ移行したくなった場合は、「移行後にパスキーを全部登録し直す」ことを
-前提に計画する。移行の直前に `RECOVERY_MODE` を使える状態を確認しておくこと。
+**登録済みのパスキーが全部使えなくなる。** 独自ドメインへ移るときは、全員のパスキーの登録し直し（リカバリーコードで戻る）が前提になる。
 
 ### Vercel のビルドコマンドに `prisma migrate deploy` を足す
 
-デプロイのたびに本番スキーマが勝手に変わる状態になる。
-スキーマを変える Step では、**ローカルから** `npm run db:deploy` を実行する。
+デプロイのたびに本番のスキーマが勝手に変わる。手順 4 のとおり手元から適用する。
 
----
+### Preview / Development に環境変数を入れる
 
-## 本番DBについて
+`main` 以外をビルドしない設定の前提が崩れる。入れるなら、本番とは別の DB と鍵にする（design-decisions.md「作業開始時の注意」）。
 
-**本番とローカル開発は同じ Neon インスタンスを使っている。**
+### 単一ユーザー版の Neon・鍵を流用する
 
-- ローカルで `next dev` を動かすと、**本番データを直接書き換える**
-- そのためデプロイ時にマイグレーションの適用作業は要らない（ローカルで適用済みのため）
-- スキーマを変えたら、ローカルから `npm run db:deploy` を実行すれば本番にも反映される
-
----
-
-## セッションを全部無効にしたいとき
-
-端末を紛失し、その端末のログイン状態を切りたい場合。
-
-`AUTH_SECRET` を新しい値に変えて Redeploy する。全セッションの JWT が検証に失敗するので、
-すべての端末がログアウトされる。**パスキーの登録自体は消えない**ので、手元の端末からは
-そのまま入り直せる。
-
-個別のセッションだけを失効させる画面は作っていない。
-
----
-
-## デプロイの仕組み
-
-- GitHub の `main` に push すると Vercel が自動でビルド・デプロイする
-- `vercel.json` の `git.deploymentEnabled` で **`main` 以外のブランチはビルドしない**設定にしてある。
-  preview デプロイは同じ本番DBを向くうえ `RP_ID` が一致せずパスキーも使えないため、
-  守りの薄い入り口が増えるだけで得るものがない
-- `/src/generated`（Prisma クライアント）は `.gitignore` 済み。
-  `package.json` の `postinstall: prisma generate` が Vercel 側で生成する
+実データが入っている。公開版とは一切共有しない。

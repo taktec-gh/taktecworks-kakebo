@@ -76,6 +76,10 @@
 - **最初のデプロイ前に確定し、以後変更しない。** URLがパスキーの `RP_ID` になり、変えると登録済みのパスキーが全部無効になる（個人用 `docs/deploy.md` の教訓）
 - 屋号を含めると他人のプロジェクト名と被りにくい（単一ユーザー版では希望した名前が他人に取られていて、別名が付いた）
 - **公開前に Vercel Hobby（無料）プランの規約を確認する。** 非商用利用が条件で、個人事業の営業に使うポートフォリオが該当するかは読み方次第
+- **2026-09-19 確定：プロジェクト名は `taktecworks-kakebo`、Hobby プランで使う（利用者の判断）。**
+  - 規約（Fair Use Guidelines、2026-09-14 更新）は商用利用を「目的」で定義しており（"used for the purpose of financial gain"）、例に "Advertising the sale of a product or service" がある。グレーと判断した
+  - アプリには受注の告知・価格・広告・事業サイトへのリンクを置かない。問題にされたら Pro に切り替える
+- **Cloudflare（Workers）は採らない（2026-09-19）。** Next.js 16 の `proxy.ts` は Node.js ランタイム固定で、OpenNext の Cloudflare 版は Node の Middleware に未対応（公式文書）。認証と CSP の nonce を担う proxy を作り直すことになる
 
 ### 6. データ分離の実装で決めたこと
 
