@@ -6,14 +6,21 @@ import { listCredentials } from "@/lib/credentials";
 import { DEMO_PASSKEY_BLOCKED_MESSAGE } from "@/lib/demo-messages";
 import { formatDateFullLabel, getCurrentDate } from "@/lib/expense-date";
 import { prisma } from "@/lib/prisma";
+import { hasRecoveryCode } from "@/lib/recovery-codes";
 import { requireUserId } from "@/lib/session";
 import { findDemoExpiresAt, findWebauthnUserId } from "@/lib/users";
 import { getPasskeyDisplayName } from "@/lib/webauthn-user-id";
 
-import { deletePasskeyAction, finishPasskeyRegistrationAction, startPasskeyRegistrationAction } from "./actions";
+import {
+  deletePasskeyAction,
+  finishPasskeyRegistrationAction,
+  regenerateRecoveryCodeAction,
+  startPasskeyRegistrationAction,
+} from "./actions";
 import type { PasskeyListItem } from "./action-state";
 import { PasskeyList } from "./passkey-list";
 import { PasskeyRegisterForm } from "./passkey-register-form";
+import { RecoveryCodeSection } from "./recovery-code-section";
 
 export const metadata: Metadata = {
   title: "パスキー",
@@ -30,6 +37,8 @@ export const metadata: Metadata = {
  *
  * **1本しか無いときは追加登録を促す。** 1台を失うと締め出されるため
  * （docs/steps/step-7.md「設計判断 2. 締め出し対策」）。
+ *
+ * **リカバリーコードの欄**（発行済みか・作り直す）を置く。デモユーザーには出さない（docs/steps/pub-5.md 設計判断 8）。
  */
 
 /** 日時（UTC の瞬間）を JST の暦日ラベルにする */
@@ -42,11 +51,13 @@ export default async function PasskeysPage() {
   // proxy とは別に、ここで利用者IDを得てデータ層へ渡す（proxy はユーザーIDを渡せない）
   const userId = await requireUserId();
 
-  const [credentials, webauthnUserId, demoExpiresAt] = await Promise.all([
+  const [credentials, webauthnUserId, demoExpiresAt, recoveryCodeIssued] = await Promise.all([
     listCredentials(prisma, userId),
     findWebauthnUserId(prisma, userId),
     // デモユーザーには登録フォームの代わりに説明を出す（docs/steps/pub-3.md 設計判断 7）。判定は DB の値
     findDemoExpiresAt(prisma, userId),
+    // リカバリーコードが発行済みか（ハッシュそのものは画面へ渡さない）
+    hasRecoveryCode(prisma, userId),
   ]);
   const isDemo = demoExpiresAt !== null;
   // パスキーの選択画面に出る表示名。同じ端末に複数のアカウントがあるときに見分けるため
@@ -109,6 +120,11 @@ export default async function PasskeysPage() {
           />
         )}
       </section>
+
+      {/* デモユーザーはリカバリーコードを持たない（docs/steps/pub-5.md 設計判断 8） */}
+      {isDemo ? null : (
+        <RecoveryCodeSection hasCode={recoveryCodeIssued} regenerate={regenerateRecoveryCodeAction} />
+      )}
     </main>
   );
 }

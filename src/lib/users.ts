@@ -5,6 +5,7 @@ import { buildDemoData, getDemoExpiresAt } from "@/lib/demo-data";
 import { recordDemoEvent } from "@/lib/demo-limits";
 import { insertDemoData } from "@/lib/demo-seed";
 import { getCurrentDate } from "@/lib/expense-date";
+import { isRecoveryCodeHash } from "@/lib/recovery-code";
 import { seedUserPresets, type SeedResult } from "@/lib/seed";
 import { recordSignupEvent } from "@/lib/signup-limits";
 import { brandUserIdFromTrustedSource, type UserId } from "@/lib/user-id";
@@ -27,11 +28,12 @@ import { generateWebauthnUserId, isValidWebauthnUserId } from "@/lib/webauthn-us
  * export しない。トランザクションの外で呼ばれて「プリセットの無いユーザー」が残る経路を作らないため。
  * 呼ぶのは下の createUserWithPresets / createUserWithPasskey / createDemoUser だけ。
  * demoExpiresAt を渡すのは createDemoUser だけ（渡さなければ通常のユーザー）。
+ * recoveryCodeHash を渡すのは createUserWithPasskey だけ（デモユーザーはコードを持たない）。
  */
 async function insertUserWithPresets(
   tx: Prisma.TransactionClient,
   webauthnUserId: string,
-  options: { demoExpiresAt?: Date } = {},
+  options: { demoExpiresAt?: Date; recoveryCodeHash?: string } = {},
 ): Promise<{ userId: UserId; presets: SeedResult }> {
   if (!isValidWebauthnUserId(webauthnUserId)) {
     throw new Error("invalid webauthnUserId");
@@ -39,6 +41,13 @@ async function insertUserWithPresets(
   const data: Prisma.UserCreateInput = { webauthnUserId };
   // デモユーザーだけが期限を持つ。通常のユーザー（サインアップ・検証スクリプト）は null のまま
   if (options.demoExpiresAt !== undefined) data.demoExpiresAt = options.demoExpiresAt;
+  if (options.recoveryCodeHash !== undefined) {
+    // 保存するのはハッシュだけ（docs/steps/pub-5.md 設計判断 2）。平文などハッシュの形でない値は保存しない
+    if (!isRecoveryCodeHash(options.recoveryCodeHash)) {
+      throw new Error("invalid recovery code hash");
+    }
+    data.recoveryCodeHash = options.recoveryCodeHash;
+  }
   const user = await tx.user.create({ data, select: { id: true } });
   const userId = brandUserIdFromTrustedSource(user.id);
   const presets = await seedUserPresets(tx, userId);
@@ -73,6 +82,11 @@ export type CreateUserWithPasskeyInput = {
   credential: CreateCredentialInput;
   /** SignupEvent に記録する IP の HMAC */
   ipHash: string;
+  /**
+   * リカバリーコードのハッシュ（src/lib/recovery-code.ts の hashRecoveryCode の値）。
+   * ユーザーと同じトランザクションで保存する（docs/steps/pub-5.md 設計判断 3）。**平文を渡さない**
+   */
+  recoveryCodeHash: string;
 };
 
 export type CreateUserWithPasskeyResult =
@@ -89,12 +103,13 @@ class DuplicateCredentialError extends Error {
 }
 
 /**
- * サインアップ: **1つのトランザクションで**ユーザー作成・プリセット投入・資格情報の保存・
- * サインアップの記録（SignupEvent）を行う（docs/steps/pub-2.md 設計判断 2・5）。
+ * サインアップ: **1つのトランザクションで**ユーザー作成（リカバリーコードのハッシュを含む）・プリセット投入・
+ * 資格情報の保存・サインアップの記録（SignupEvent）を行う（docs/steps/pub-2.md 設計判断 2・5、pub-5.md 設計判断 3）。
  *
  * どれかが失敗したら全部を戻す。資格情報の重複（P2002）でも、ユーザー・プリセット・
  * SignupEvent は1件も残らない。重複は `{ ok: false, reason: "duplicate" }`、
  * それ以外の失敗は例外のまま投げる（呼び出し側で一般的な失敗の文言にする）。
+ * recoveryCodeHash がハッシュの形（64文字の16進）でなければ、トランザクションを始める前に例外を投げる。
  *
  * 登録応答の検証は呼び出し側で**この関数を呼ぶ前に**済ませること。
  */
@@ -102,9 +117,15 @@ export async function createUserWithPasskey(
   client: PrismaClient,
   input: CreateUserWithPasskeyInput,
 ): Promise<CreateUserWithPasskeyResult> {
+  // サインアップしたユーザーは必ずリカバリーコードを持つ。ハッシュの形でなければ何も作らない（平文を保存しない）
+  if (!isRecoveryCodeHash(input.recoveryCodeHash)) {
+    throw new Error("invalid recovery code hash");
+  }
   try {
     const userId = await client.$transaction(async (tx) => {
-      const { userId: createdUserId } = await insertUserWithPresets(tx, input.webauthnUserId);
+      const { userId: createdUserId } = await insertUserWithPresets(tx, input.webauthnUserId, {
+        recoveryCodeHash: input.recoveryCodeHash,
+      });
 
       const credential = await createCredential(tx, createdUserId, input.credential);
       // 失敗を戻り値で返すとトランザクションがコミットされてしまうので、例外で抜けて全部を戻す

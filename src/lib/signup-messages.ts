@@ -15,8 +15,8 @@ export const SIGNUP_PATH = "/signup";
 /**
  * サインアップ完了後の遷移先。**ここ1箇所で決める。**
  *
- * リカバリーコードを後で足すときは、ここをコードの表示画面に変える
- * （docs/steps/pub-2.md 設計判断 1）。
+ * 登録の直後はサインアップ画面がリカバリーコードの表示に切り替わり、「控えました」の後にここへ移る
+ * （docs/steps/pub-5.md 設計判断 3）。
  */
 export const SIGNUP_COMPLETE_PATH = "/";
 

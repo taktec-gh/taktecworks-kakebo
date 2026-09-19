@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { RECOVERY_PATH } from "@/lib/recovery-messages";
 import { SIGNUP_PATH } from "@/lib/signup-messages";
 
 import { startDemoAction } from "./actions";
@@ -43,6 +44,11 @@ export default function LoginPage() {
         <p className="text-sm opacity-70">
           別の端末に保存したパスキーも、QR コードを使ってログインに使えます。
         </p>
+
+        {/* リカバリーコードでの復旧（docs/steps/pub-5.md 設計判断 9）。登録の有無で出し分けない */}
+        <Link href={RECOVERY_PATH} className="text-sm underline underline-offset-4 opacity-80">
+          パスキーをなくした場合
+        </Link>
 
         <div className="flex flex-col gap-1 border-t border-black/10 pt-5 text-sm dark:border-white/15">
           <p className="opacity-70">はじめて使う方</p>
