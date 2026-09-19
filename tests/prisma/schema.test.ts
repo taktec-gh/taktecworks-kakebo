@@ -118,6 +118,16 @@ describe("User（設計判断 2: 最小限のモデル）", () => {
   it("demoExpiresAt のインデックスがある（期限切れの削除の検索用。設計判断 1）", () => {
     expect(body).toContain("@@index([demoExpiresAt])");
   });
+
+  // docs/steps/pub-5.md 設計判断 2「User.recoveryCodeHash（String?、@unique）。正規化したコードの
+  // SHA-256（16進）。null は『コードが無い』」「ユニーク制約でコードからユーザーを1人に特定する」
+  it("recoveryCodeHash は任意項目（String?）。null は未発行・デモユーザー（docs/steps/pub-5.md 設計判断 2）", () => {
+    expect(fieldLine(body, "recoveryCodeHash")).toMatch(/^\s*recoveryCodeHash\s+String\?\s*/);
+  });
+
+  it("recoveryCodeHash は @unique（コードのハッシュからユーザーを1人に特定するため）", () => {
+    expect(fieldLine(body, "recoveryCodeHash")).toMatch(/@unique/);
+  });
 });
 
 describe("DemoEvent（userId を持たない3つ目のモデル。docs/steps/pub-3.md 設計判断 4）", () => {

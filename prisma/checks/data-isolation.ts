@@ -54,6 +54,7 @@ import {
 } from "@/lib/payment-sources";
 import { PASSKEY_ERRORS } from "@/lib/passkey";
 import { createPrismaClient } from "@/lib/prisma";
+import { hashRecoveryCode, generateRecoveryCode } from "@/lib/recovery-code";
 import { PRESET_CATEGORIES, seedUserPresets } from "@/lib/seed";
 import type { UserId } from "@/lib/user-id";
 import { createUserWithPasskey, createUserWithPresets } from "@/lib/users";
@@ -516,6 +517,8 @@ async function run(prisma: PrismaClient, createdUserIds: string[]): Promise<void
       webauthnUserId: generateWebauthnUserId(),
       credential: signupCredential,
       ipHash: CHECK_IP_HASH,
+      // 平文は使い捨て（出力も保存もしない）。ハッシュだけを渡す
+      recoveryCodeHash: hashRecoveryCode(generateRecoveryCode()),
     });
     if (!result.ok) return false;
     createdUserIds.push(result.userId);
@@ -543,6 +546,8 @@ async function run(prisma: PrismaClient, createdUserIds: string[]): Promise<void
       webauthnUserId: generateWebauthnUserId(),
       credential: signupCredential,
       ipHash: CHECK_IP_HASH,
+      // 平文は使い捨て（出力も保存もしない）。ハッシュだけを渡す
+      recoveryCodeHash: hashRecoveryCode(generateRecoveryCode()),
     });
     if (result.ok) createdUserIds.push(result.userId);
     const [usersAfter, categoriesAfter, eventsAfter] = await Promise.all([

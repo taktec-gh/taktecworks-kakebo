@@ -10,10 +10,11 @@ import {
   getRpConfig,
   validateDeviceName,
   type PasskeyRegistrationOptionsResult,
-  type PasskeyVerificationResult,
 } from "@/lib/passkey";
 import { consumeSignupChallengeCookie, setSignupChallengeCookie } from "@/lib/passkey-session";
 import { prisma } from "@/lib/prisma";
+import { issueRecoveryCode } from "@/lib/recovery-code";
+import type { RecoveryCodeIssuedResult } from "@/lib/recovery-messages";
 import { createSession } from "@/lib/session";
 import { isSignupRateLimited } from "@/lib/signup-limits";
 import { SIGNUP_ERRORS } from "@/lib/signup-messages";
@@ -35,8 +36,9 @@ import type { RegistrationResponseJSON } from "@simplewebauthn/server";
  *    チャレンジと一緒に署名付きの短命 Cookie に入れる。**DB には何も書かない**
  * 2. ブラウザでパスキーを作る
  * 3. finishSignupAction: Cookie を消費し、レート制限を再確認し、登録応答を検証する。
- *    通ったら1つのトランザクションでユーザー・プリセット・資格情報・SignupEvent を作り、
- *    **今作ったユーザーの**セッションを発行する
+ *    通ったら1つのトランザクションでユーザー（リカバリーコードのハッシュを含む）・プリセット・資格情報・
+ *    SignupEvent を作り、**今作ったユーザーの**セッションを発行する。
+ *    成功の戻り値でリカバリーコードの平文を**一度だけ**返す（docs/steps/pub-5.md 設計判断 3）
  *
  * - **webauthnUserId は署名付き Cookie からだけ取り出す。** 登録応答やフォームから受け取らない
  * - 失敗理由は出してよい（ユーザー名が無いので登録の有無が漏れない）。
@@ -82,12 +84,16 @@ export async function startSignupAction(): Promise<PasskeyRegistrationOptionsRes
  * 登録応答を検証し、通ればユーザーを作ってそのユーザーのセッションを発行する。
  *
  * チャレンジ Cookie は**成否にかかわらず最初に消える**（単回性）。失敗したら開始からやり直す。
- * 成功しても画面遷移はここでは行わない（呼び出し元の Client Component が SIGNUP_COMPLETE_PATH へ移動する）。
+ * 成功しても画面遷移はここでは行わない（呼び出し元の Client Component がリカバリーコードを表示し、
+ * 「控えました」の後に SIGNUP_COMPLETE_PATH へ移動する）。
+ *
+ * 成功時は `{ ok: true, recoveryCode }`（表示用に区切った平文）。DB にはそのハッシュだけを
+ * ユーザーと同じトランザクションで保存する。**失敗時にはコードを返さない。**
  */
 export async function finishSignupAction(
   response: RegistrationResponseJSON,
   deviceName: string,
-): Promise<PasskeyVerificationResult> {
+): Promise<RecoveryCodeIssuedResult> {
   let signupChallenge: Awaited<ReturnType<typeof consumeSignupChallengeCookie>>;
   try {
     signupChallenge = await consumeSignupChallengeCookie();
@@ -137,6 +143,8 @@ export async function finishSignupAction(
 
   // ここより前では DB に何も書いていない（途中離脱・検証失敗でユーザーを残さない）
   const { credential } = verification.registrationInfo;
+  // 平文は戻り値で画面に一度渡すだけ。DB にはハッシュだけを渡す
+  const recoveryCode = issueRecoveryCode();
   let created: Awaited<ReturnType<typeof createUserWithPasskey>>;
   try {
     created = await createUserWithPasskey(prisma, {
@@ -150,6 +158,7 @@ export async function finishSignupAction(
         deviceName: validatedName.value,
       },
       ipHash,
+      recoveryCodeHash: recoveryCode.hash,
     });
   } catch {
     return { ok: false, error: SIGNUP_ERRORS.unavailable };
@@ -161,7 +170,8 @@ export async function finishSignupAction(
     await createSession(created.userId);
   } catch {
     // ユーザーは作られている。ログイン画面から入れるので、一般的な失敗として返す
+    // （コードは返さない。ログイン後に設定から作り直せる）
     return { ok: false, error: SIGNUP_ERRORS.unavailable };
   }
-  return { ok: true };
+  return { ok: true, recoveryCode: recoveryCode.code };
 }

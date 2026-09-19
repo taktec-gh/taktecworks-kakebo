@@ -19,6 +19,13 @@ import {
 } from "@/lib/passkey";
 import { consumeChallengeCookie, setChallengeCookie } from "@/lib/passkey-session";
 import { prisma } from "@/lib/prisma";
+import { issueRecoveryCode } from "@/lib/recovery-code";
+import { regenerateRecoveryCodeHash } from "@/lib/recovery-codes";
+import {
+  DEMO_RECOVERY_CODE_BLOCKED_MESSAGE,
+  RECOVERY_REGENERATE_ERRORS,
+  type RecoveryCodeIssuedResult,
+} from "@/lib/recovery-messages";
 import { requireUserId } from "@/lib/session";
 import type { UserId } from "@/lib/user-id";
 import { findDemoExpiresAt, findWebauthnUserId } from "@/lib/users";
@@ -178,4 +185,29 @@ export async function deletePasskeyAction(
 
   revalidatePath(PASSKEYS_PATH);
   return { error: null };
+}
+
+/**
+ * リカバリーコードを作り直す（docs/steps/pub-5.md 設計判断 8）。新しいコード（表示用に区切った平文）を一度だけ返す。
+ *
+ * - `requireUserId()` の値で `where: { id: userId }` を更新する。**古いコードはこの時点で使えなくなる**
+ * - **デモユーザーは拒否する**（DB の demoExpiresAt を userId で絞って見る。画面の表示に頼らない）
+ * - 作り直しの前のパスキーでの再認証は求めない（セッションの個別失効と一緒に考える。範囲外）
+ * - DB に渡すのはハッシュだけ
+ */
+export async function regenerateRecoveryCodeAction(): Promise<RecoveryCodeIssuedResult> {
+  const userId = await requireUserId();
+
+  try {
+    if (await isDemoUser(userId)) return { ok: false, error: DEMO_RECOVERY_CODE_BLOCKED_MESSAGE };
+
+    const recoveryCode = issueRecoveryCode();
+    const updated = await regenerateRecoveryCodeHash(prisma, userId, recoveryCode.hash);
+    if (!updated) return { ok: false, error: RECOVERY_REGENERATE_ERRORS.accountNotFound };
+
+    revalidatePath(PASSKEYS_PATH);
+    return { ok: true, recoveryCode: recoveryCode.code };
+  } catch {
+    return { ok: false, error: RECOVERY_REGENERATE_ERRORS.unavailable };
+  }
 }

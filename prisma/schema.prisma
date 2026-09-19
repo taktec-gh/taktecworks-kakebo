@@ -1,7 +1,7 @@
 // Prisma schema
 // 参照: https://pris.ly/d/prisma-schema
 //
-// 仕様の出典: docs/features.md / docs/steps/step-2.md / docs/steps/pub-1.md / docs/steps/pub-2.md / docs/steps/pub-3.md
+// 仕様の出典: docs/features.md / docs/steps/step-2.md / docs/steps/pub-1.md / docs/steps/pub-2.md / docs/steps/pub-3.md / docs/steps/pub-5.md
 //
 // 共通規約
 // - 全データモデルに userId（User への参照、onDelete: Cascade）を持たせる。
@@ -74,6 +74,14 @@ model User {
   /// **作成時に決め、以後変えない。** 延長・デモと通常の切り替えの経路を作らない。
   /// 期限切れの行は定期処理（src/lib/cleanup.ts）が削除する
   demoExpiresAt DateTime?
+
+  /// リカバリーコード（パスキーを全部なくしたときの逃げ道）のハッシュ。
+  /// **正規化したコードの SHA-256（16進・64文字）。平文は保存しない**（docs/steps/pub-5.md 設計判断 1・2）。
+  /// 鍵なしのハッシュにする（コードは100ビットの乱数で、ハッシュから総当たりで戻せない。
+  /// 鍵を使うと鍵の交換で全員のコードが使えなくなる）。
+  /// null は「コードが無い」（デモユーザー、または未発行）。ユニーク制約でコードからユーザーを1人に特定する。
+  /// 書き換えるのはサインアップ・リカバリーの完了（条件つき更新）・設定からの作り直しだけ（src/lib/recovery-codes.ts / users.ts）
+  recoveryCodeHash String? @unique
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

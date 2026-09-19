@@ -39,20 +39,23 @@ export const RP_NAME = "家計簿";
  * - register: 設定画面での追加登録（ログイン中の利用者に紐づく）
  * - authenticate: ログイン
  * - signup: サインアップ（まだ利用者がいない。webauthnUserId を一緒に運ぶ）
+ * - recovery: リカバリー中の登録（ログインしていない。利用者はリカバリー用トークンで決まる）
  *
- * 3つとも別の値にし、検証で一致を要求する（docs/steps/pub-2.md 設計判断 2）。
+ * 4つとも別の値にし、検証で一致を要求する（docs/steps/pub-2.md 設計判断 2、pub-5.md 設計判断 5）。
  */
 export const REGISTER_CHALLENGE_SUBJECT = "passkey-register";
 export const AUTH_CHALLENGE_SUBJECT = "passkey-auth";
 export const SIGNUP_CHALLENGE_SUBJECT = "passkey-signup";
+export const RECOVERY_CHALLENGE_SUBJECT = "passkey-recovery";
 
 /** チャレンジの有効期間（秒）。単回・短命であること自体が防御になる */
 export const CHALLENGE_MAX_AGE_SECONDS = 120;
 
-/** チャレンジを格納する Cookie 名。登録用・認証用・サインアップ用を混ぜない */
+/** チャレンジを格納する Cookie 名。登録用・認証用・サインアップ用・リカバリー中の登録用を混ぜない */
 export const REGISTER_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_register";
 export const AUTH_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_auth";
 export const SIGNUP_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_signup";
+export const RECOVERY_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_recovery";
 
 /**
  * 端末名の最大文字数と画面文言の実体は src/lib/passkey-messages.ts にある
@@ -62,13 +65,16 @@ export const SIGNUP_CHALLENGE_COOKIE_NAME = "kakeibo_passkey_signup";
 export { DEVICE_NAME_MAX_LENGTH, PASSKEY_ERRORS } from "@/lib/passkey-messages";
 
 /**
- * チャレンジの用途（登録 / 認証）。
+ * チャレンジの用途（設定画面の登録 / ログイン / リカバリー中の登録）。
  *
  * サインアップ用はここに含めない。サインアップのチャレンジは webauthnUserId を必ず伴うため、
  * 専用の createSignupChallengeToken / verifySignupChallengeToken だけで扱う
  * （汎用の関数で webauthnUserId の無いサインアップ用トークンを作れないようにする）。
+ *
+ * リカバリー中の登録（recovery）はチャレンジだけを運ぶ。利用者はリカバリー用トークン
+ * （src/lib/auth.ts の verifyRecoveryToken）で決まるので、チャレンジには入れない。
  */
-export type ChallengePurpose = "register" | "authenticate";
+export type ChallengePurpose = "register" | "authenticate" | "recovery";
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -76,14 +82,26 @@ export type PasskeyResult<T> = { ok: true; value: T } | { ok: false; error: stri
 
 /** チャレンジ用途に対応する JWT の sub */
 export function getChallengeSubject(purpose: ChallengePurpose): string {
-  return purpose === "register" ? REGISTER_CHALLENGE_SUBJECT : AUTH_CHALLENGE_SUBJECT;
+  switch (purpose) {
+    case "register":
+      return REGISTER_CHALLENGE_SUBJECT;
+    case "authenticate":
+      return AUTH_CHALLENGE_SUBJECT;
+    case "recovery":
+      return RECOVERY_CHALLENGE_SUBJECT;
+  }
 }
 
 /** チャレンジ用途に対応する Cookie 名 */
 export function getChallengeCookieName(purpose: ChallengePurpose): string {
-  return purpose === "register"
-    ? REGISTER_CHALLENGE_COOKIE_NAME
-    : AUTH_CHALLENGE_COOKIE_NAME;
+  switch (purpose) {
+    case "register":
+      return REGISTER_CHALLENGE_COOKIE_NAME;
+    case "authenticate":
+      return AUTH_CHALLENGE_COOKIE_NAME;
+    case "recovery":
+      return RECOVERY_CHALLENGE_COOKIE_NAME;
+  }
 }
 
 export type RpConfig = {

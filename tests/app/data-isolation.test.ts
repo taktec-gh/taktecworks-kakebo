@@ -72,7 +72,13 @@ import {
   updatePaymentSource,
 } from "@/lib/payment-sources";
 import { PAYMENT_SOURCE_ORDER_ERRORS } from "@/lib/payment-source-order";
+import {
+  completeRecoveryWithPasskey,
+  findRecoveryUserIdByCodeHash,
+  regenerateRecoveryCodeHash,
+} from "@/lib/recovery-codes";
 import type { UserId } from "@/lib/user-id";
+import { findWebauthnUserId } from "@/lib/users";
 
 import { FakePrismaClient, matchWhere, type TableName } from "../support/fake-prisma-client";
 
@@ -194,6 +200,18 @@ const USER_A = "user_a" as UserId;
 const USER_B = "user_b" as UserId;
 
 const YEAR_MONTH = "2026-08";
+
+// リカバリーコードのハッシュの形（isRecoveryCodeHash が要求する /^[0-9a-f]{64}$/）。
+// docs/steps/pub-5.md 設計判断 2。実際の SHA-256 の値である必要は無く、形が正しければよい
+// （データ層は形だけを検査し、ハッシュを計算し直したりはしない）
+const RECOVERY_HASH_A = "a".repeat(64);
+const RECOVERY_HASH_B = "b".repeat(64);
+const RECOVERY_HASH_NEW = "c".repeat(64);
+const RECOVERY_HASH_REGENERATED = "d".repeat(64);
+
+// 32バイトの暗号学的乱数を base64url にした値（isValidWebauthnUserId が要求する形式）
+const WEBAUTHN_USER_ID_A = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+const WEBAUTHN_USER_ID_B = "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA";
 
 function buildFixture() {
   const now = new Date("2026-08-01T00:00:00.000Z");
@@ -431,7 +449,28 @@ function buildFixture() {
     },
   ];
 
+  // docs/steps/pub-5.md「User.recoveryCodeHash」。id は User.id そのもの（credential.userId が参照する値）
+  const user = [
+    {
+      id: USER_A,
+      webauthnUserId: WEBAUTHN_USER_ID_A,
+      recoveryCodeHash: RECOVERY_HASH_A,
+      demoExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: USER_B,
+      webauthnUserId: WEBAUTHN_USER_ID_B,
+      recoveryCodeHash: RECOVERY_HASH_B,
+      demoExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+
   const seed: Partial<Record<TableName, Record<string, unknown>[]>> = {
+    user,
     paymentSource,
     category,
     expense,
@@ -883,6 +922,117 @@ const ISOLATION_TABLE: IsolationCase[] = [
       const result = await deleteCredential(asPrismaClient(client), USER_A, "cred_b_1");
       expect(result).toEqual({ ok: false, error: PASSKEY_ERRORS.notFound });
       expect(client.snapshot("credential").some((r) => r.id === "cred_b_1")).toBe(true);
+    },
+  },
+
+  // --- リカバリーコード（docs/steps/pub-5.md） --------------------------
+  {
+    action: "verifyRecoveryCodeAction",
+    file: "src/app/(auth)/recovery/actions.ts",
+    target: "User.recoveryCodeHash",
+    operation: "コードのハッシュから利用者を探す（findRecoveryUserIdByCodeHash）",
+    scenario:
+      "Bのコードのハッシュで探すとBのIDだけが見つかり、Aには返らない（逆も同様）。" +
+      "userId を取らない例外なので、ここでは『取り違えない』ことを確認する",
+    run: async ({ client }) => {
+      const foundForB = await findRecoveryUserIdByCodeHash(asPrismaClient(client), RECOVERY_HASH_B);
+      expect(foundForB).toBe(USER_B);
+      expect(foundForB).not.toBe(USER_A);
+
+      const foundForA = await findRecoveryUserIdByCodeHash(asPrismaClient(client), RECOVERY_HASH_A);
+      expect(foundForA).toBe(USER_A);
+      expect(foundForA).not.toBe(USER_B);
+    },
+  },
+  {
+    action: "startRecoveryPasskeyRegistrationAction",
+    file: "src/app/(auth)/recovery/actions.ts",
+    target: "Credential（excludeCredentialsの元データ）/ User.webauthnUserId",
+    operation: "登録用オプションの元データ",
+    scenario:
+      "リカバリー用トークンの利用者（A）の webauthnUserId とAの資格情報だけを見る。" +
+      "Bの webauthnUserId・資格情報IDは含まれない",
+    run: async ({ client }) => {
+      const webauthnUserIdForA = await findWebauthnUserId(asPrismaClient(client), USER_A);
+      expect(webauthnUserIdForA).toBe(WEBAUTHN_USER_ID_A);
+      expect(webauthnUserIdForA).not.toBe(WEBAUTHN_USER_ID_B);
+
+      const existingForA = await listCredentials(asPrismaClient(client), USER_A);
+      expect(existingForA.map((c) => c.credentialId).sort()).toEqual(["cred-a-1", "cred-a-2"]);
+    },
+  },
+  {
+    action: "finishRecoveryPasskeyRegistrationAction",
+    file: "src/app/(auth)/recovery/actions.ts",
+    target: "User.recoveryCodeHash / Credential",
+    operation: "コードの差し替え（条件つき）＋資格情報の作成（completeRecoveryWithPasskey）",
+    scenario:
+      "AのuserIdでBの現在のコードのハッシュをexpectedCodeHashに指定しても、差し替えのwhereが" +
+      "{ id: userId, recoveryCodeHash: expectedCodeHash } なので一致せず codeNotCurrent になり、" +
+      "資格情報も作られない。Aの現在のハッシュを指定した場合だけ成功し、Bのハッシュは変化しない（変異#3）",
+    run: async ({ client }) => {
+      const attack = await completeRecoveryWithPasskey(asPrismaClient(client), {
+        userId: USER_A,
+        // Bの現在のハッシュを（Aの userId とともに）指定する乗っ取りの試み
+        expectedCodeHash: RECOVERY_HASH_B,
+        newCodeHash: RECOVERY_HASH_NEW,
+        credential: {
+          credentialId: "cred-attack",
+          publicKey: new Uint8Array([9]),
+          counter: 0,
+          transports: ["internal"],
+          deviceName: "乗っ取り",
+        },
+      });
+      expect(attack).toEqual({ ok: false, reason: "codeNotCurrent" });
+
+      const aRowAfterAttack = client.snapshot("user").find((r) => r.id === USER_A);
+      const bRowAfterAttack = client.snapshot("user").find((r) => r.id === USER_B);
+      expect(aRowAfterAttack?.recoveryCodeHash).toBe(RECOVERY_HASH_A);
+      expect(bRowAfterAttack?.recoveryCodeHash).toBe(RECOVERY_HASH_B);
+      expect(client.snapshot("credential").some((c) => c.credentialId === "cred-attack")).toBe(
+        false,
+      );
+
+      // 正しい組み合わせ（Aの userId とAの現在のハッシュ）なら成功し、Aだけが更新される
+      const ok = await completeRecoveryWithPasskey(asPrismaClient(client), {
+        userId: USER_A,
+        expectedCodeHash: RECOVERY_HASH_A,
+        newCodeHash: RECOVERY_HASH_NEW,
+        credential: {
+          credentialId: "cred-a-recovered",
+          publicKey: new Uint8Array([9]),
+          counter: 0,
+          transports: ["internal"],
+          deviceName: "新しい端末",
+        },
+      });
+      expect(ok).toEqual({ ok: true });
+
+      const aRowAfterOk = client.snapshot("user").find((r) => r.id === USER_A);
+      const bRowAfterOk = client.snapshot("user").find((r) => r.id === USER_B);
+      expect(aRowAfterOk?.recoveryCodeHash).toBe(RECOVERY_HASH_NEW);
+      expect(bRowAfterOk?.recoveryCodeHash).toBe(RECOVERY_HASH_B); // Bは無関係のまま
+    },
+  },
+  {
+    action: "regenerateRecoveryCodeAction",
+    file: "src/app/settings/passkeys/actions.ts",
+    target: "User.recoveryCodeHash",
+    operation: "作り直し（regenerateRecoveryCodeHash）",
+    scenario: "AのuserIdで作り直すとAだけが更新され、Bのコードのハッシュは変わらない",
+    run: async ({ client }) => {
+      const result = await regenerateRecoveryCodeHash(
+        asPrismaClient(client),
+        USER_A,
+        RECOVERY_HASH_REGENERATED,
+      );
+      expect(result).toBe(true);
+
+      const aRow = client.snapshot("user").find((r) => r.id === USER_A);
+      const bRow = client.snapshot("user").find((r) => r.id === USER_B);
+      expect(aRow?.recoveryCodeHash).toBe(RECOVERY_HASH_REGENERATED);
+      expect(bRow?.recoveryCodeHash).toBe(RECOVERY_HASH_B);
     },
   },
 

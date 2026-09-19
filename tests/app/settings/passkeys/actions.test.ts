@@ -15,6 +15,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEMO_PASSKEY_BLOCKED_MESSAGE } from "@/lib/demo-messages";
 import { createChallengeToken } from "@/lib/passkey";
 import { PASSKEY_ERRORS } from "@/lib/passkey-messages";
+import {
+  DEMO_RECOVERY_CODE_BLOCKED_MESSAGE,
+  RECOVERY_REGENERATE_ERRORS,
+} from "@/lib/recovery-messages";
 import type { UserId } from "@/lib/user-id";
 import { getPasskeyDisplayName } from "@/lib/webauthn-user-id";
 
@@ -114,10 +118,18 @@ vi.mock("@/lib/users", () => ({
 const USER_WEBAUTHN_USER_ID = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
 const OTHER_USER_WEBAUTHN_USER_ID = "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA";
 
+// ---- @/lib/recovery-codes のモック（docs/steps/pub-5.md 設計判断 8）。
+// regenerateRecoveryCodeHash 自体の正しさは tests/lib/recovery-codes.test.ts で検証済み ----
+const regenerateRecoveryCodeHash = vi.fn();
+vi.mock("@/lib/recovery-codes", () => ({
+  regenerateRecoveryCodeHash: (...args: unknown[]) => regenerateRecoveryCodeHash(...args),
+}));
+
 const {
   startPasskeyRegistrationAction,
   finishPasskeyRegistrationAction,
   deletePasskeyAction,
+  regenerateRecoveryCodeAction,
 } = await import("@/app/settings/passkeys/actions");
 const { initialPasskeyActionState } = await import("@/app/settings/passkeys/action-state");
 
@@ -189,6 +201,8 @@ beforeEach(() => {
   findDemoExpiresAt.mockReset();
   // 既定は通常ユーザー（デモではない）。docs/steps/pub-3.md 設計判断7
   findDemoExpiresAt.mockResolvedValue(null);
+  regenerateRecoveryCodeHash.mockReset();
+  regenerateRecoveryCodeHash.mockResolvedValue(true);
 
   vi.stubEnv("AUTH_SECRET", SECRET);
   vi.stubEnv("RP_ID", RP_ID);
@@ -229,6 +243,12 @@ describe("要ログイン", () => {
       deletePasskeyAction(initialPasskeyActionState, formDataOf({ id: "cred_1" })),
     ).rejects.toThrow("NEXT_REDIRECT");
     expect(deleteCredential).not.toHaveBeenCalled();
+  });
+
+  it("regenerateRecoveryCodeAction は未ログインなら /login へ redirect し、DB を呼ばない（docs/steps/pub-5.md 設計判断 8）", async () => {
+    mockUnauthenticated();
+    await expect(regenerateRecoveryCodeAction()).rejects.toThrow("NEXT_REDIRECT");
+    expect(regenerateRecoveryCodeHash).not.toHaveBeenCalled();
   });
 });
 
@@ -289,6 +309,76 @@ describe("デモユーザーの拒否（docs/steps/pub-3.md 設計判断7。画�
     const result = await finishPasskeyRegistrationAction(regResponse, "iPhone");
 
     expect(result).toEqual({ ok: true });
+  });
+
+  it("regenerateRecoveryCodeAction: デモユーザーなら DEMO_RECOVERY_CODE_BLOCKED_MESSAGE を返し、regenerateRecoveryCodeHash を呼ばない（変異#11）", async () => {
+    findDemoExpiresAt.mockResolvedValue(new Date("2026-08-15T00:00:00.000Z"));
+
+    const result = await regenerateRecoveryCodeAction();
+
+    expect(result).toEqual({ ok: false, error: DEMO_RECOVERY_CODE_BLOCKED_MESSAGE });
+    expect(regenerateRecoveryCodeHash).not.toHaveBeenCalled();
+  });
+
+  it("regenerateRecoveryCodeAction: findDemoExpiresAt は requireUserId が返した userId で呼ぶ", async () => {
+    await regenerateRecoveryCodeAction();
+    expect(findDemoExpiresAt).toHaveBeenCalledWith(expect.anything(), USER_ID);
+  });
+
+  it("regenerateRecoveryCodeAction: 通常ユーザーなら拒否されない", async () => {
+    findDemoExpiresAt.mockResolvedValue(null);
+    const result = await regenerateRecoveryCodeAction();
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("regenerateRecoveryCodeAction（docs/steps/pub-5.md 設計判断 8。tester 向けの方針 7）", () => {
+  it("成功時は新しいコード（平文）を返し、そのハッシュを requireUserId が返した userId で作り直す（where: { id: userId } は data 層の責務）", async () => {
+    const { hashRecoveryCode } = await import("@/lib/recovery-code");
+
+    const result = await regenerateRecoveryCodeAction();
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(typeof result.recoveryCode).toBe("string");
+    expect(result.recoveryCode.length).toBeGreaterThan(0);
+
+    expect(regenerateRecoveryCodeHash).toHaveBeenCalledTimes(1);
+    const [, calledUserId, calledHash] = regenerateRecoveryCodeHash.mock.calls[0] as [
+      unknown,
+      UserId,
+      string,
+    ];
+    expect(calledUserId).toBe(USER_ID);
+    // DB に渡したハッシュは、戻り値の平文コードのハッシュと一致する（同じコードを画面と DB に渡している）
+    expect(calledHash).toBe(hashRecoveryCode(result.recoveryCode));
+  });
+
+  it("呼ぶたびに違うコードになる（毎回新しく発行する）", async () => {
+    const first = await regenerateRecoveryCodeAction();
+    const second = await regenerateRecoveryCodeAction();
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    if (!first.ok || !second.ok) throw new Error("unreachable");
+    expect(first.recoveryCode).not.toBe(second.recoveryCode);
+  });
+
+  it("成功したら一覧を revalidate する", async () => {
+    await regenerateRecoveryCodeAction();
+    expect(revalidatePath).toHaveBeenCalledWith("/settings/passkeys");
+  });
+
+  it("更新が0件（利用者の行が無い）なら accountNotFound を返す", async () => {
+    regenerateRecoveryCodeHash.mockResolvedValue(false);
+    const result = await regenerateRecoveryCodeAction();
+    expect(result).toEqual({ ok: false, error: RECOVERY_REGENERATE_ERRORS.accountNotFound });
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("regenerateRecoveryCodeHash が例外を投げたら unavailable", async () => {
+    regenerateRecoveryCodeHash.mockRejectedValue(new Error("db unavailable"));
+    const result = await regenerateRecoveryCodeAction();
+    expect(result).toEqual({ ok: false, error: RECOVERY_REGENERATE_ERRORS.unavailable });
   });
 });
 
