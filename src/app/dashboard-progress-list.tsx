@@ -21,10 +21,10 @@ import { PAYMENT_SOURCE_TYPE_LABELS } from "@/lib/payment-source-validation";
 
 /** ペースごとのバーの色 */
 const BAR_COLOR_CLASS: Record<PaceStatus, string> = {
-  under: "bg-emerald-600",
-  warning: "bg-amber-500",
-  over: "bg-red-600",
-  unknown: "bg-black/30 dark:bg-white/40",
+  under: "fill-emerald-600",
+  warning: "fill-amber-500",
+  over: "fill-red-600",
+  unknown: "fill-black/30 dark:fill-white/40",
 };
 
 /** ペースごとの文字色。数字と判定文言に使う */
@@ -41,7 +41,13 @@ export type DashboardProgressBarProps = {
   status: PaceStatus;
 };
 
-/** 消化率バー。数字は各行が別に出しているので、バー自体は装飾として扱う */
+/**
+ * 消化率バー。数字は各行が別に出しているので、バー自体は装飾として扱う。
+ *
+ * 幅は SVG の `<rect width="N%">`（プレゼンテーション属性）で決める。
+ * インラインの `style` 属性は CSP の style-src に 'unsafe-inline' が無いとブロックされるため使わない
+ * （docs/steps/pub-4.md 設計判断 3）。
+ */
 export function DashboardProgressBar({ usageRatio, status }: DashboardProgressBarProps) {
   if (usageRatio === null) return null;
 
@@ -50,10 +56,17 @@ export function DashboardProgressBar({ usageRatio, status }: DashboardProgressBa
       aria-hidden="true"
       className="h-2 w-full overflow-hidden rounded-full bg-black/10 dark:bg-white/15"
     >
-      <div
-        style={{ width: `${getUsageBarPercent(usageRatio)}%` }}
-        className={`h-full rounded-full ${BAR_COLOR_CLASS[status]}`}
-      />
+      <svg className="block h-full w-full" focusable="false">
+        <rect
+          x="0"
+          y="0"
+          width={`${getUsageBarPercent(usageRatio)}%`}
+          height="100%"
+          rx="4"
+          ry="4"
+          className={BAR_COLOR_CLASS[status]}
+        />
+      </svg>
     </div>
   );
 }

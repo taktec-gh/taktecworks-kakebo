@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { connection } from "next/server";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -23,7 +24,16 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+/**
+ * connection() で全ページを動的レンダリングにする。
+ *
+ * CSP の nonce は描画のたびに Next.js がスクリプトに付けるため、静的に生成されたページには
+ * nonce が入らず、本番でスクリプトが全部ブロックされる（docs/steps/pub-4.md 設計判断 5）。
+ * ルートレイアウトで一度だけ行い、ページを足したときに付け忘れないようにする。
+ */
+export default async function RootLayout({ children }: LayoutProps<"/">) {
+  await connection();
+
   return (
     <html
       lang="ja"
