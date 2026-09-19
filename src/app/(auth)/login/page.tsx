@@ -1,4 +1,7 @@
 import type { Metadata } from "next";
+import Link from "next/link";
+
+import { SIGNUP_PATH } from "@/lib/signup-messages";
 
 import { startPasskeyLoginAction, verifyPasskeyLoginAction } from "./passkey-actions";
 import { PasskeyLoginButton } from "./passkey-login-button";
@@ -23,6 +26,17 @@ export default function LoginPage() {
         <h1 className="text-2xl font-bold">家計簿</h1>
 
         <PasskeyLoginButton start={startPasskeyLoginAction} verify={verifyPasskeyLoginAction} />
+
+        <p className="text-sm opacity-70">
+          別の端末に保存したパスキーも、QR コードを使ってログインに使えます。
+        </p>
+
+        <div className="flex flex-col gap-1 border-t border-black/10 pt-5 text-sm dark:border-white/15">
+          <p className="opacity-70">はじめて使う方</p>
+          <Link href={SIGNUP_PATH} className="font-semibold underline underline-offset-4">
+            アカウントを作る
+          </Link>
+        </div>
       </div>
     </main>
   );

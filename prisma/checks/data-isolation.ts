@@ -7,7 +7,9 @@
  * 効くことは保証できない。このスクリプトはそこを実DBで確かめる。
  *
  * - **接続先のホストが localhost / 127.0.0.1 以外なら何もせず終了コード1で終わる**
- * - 自分で作ったユーザー A・B のデータだけを使い、成否にかかわらず finally で両ユーザーを削除する
+ * - 自分で作ったユーザー A・B（と 7. のサインアップで作るユーザー）のデータだけを使い、
+ *   成否にかかわらず finally で削除する。SignupEvent は userId を持たないので、
+ *   このスクリプト専用の ipHash（CHECK_IP_HASH）で記録し、その ipHash の行を消す
  * - 出力は検査項目ごとの OK / NG だけ。接続文字列・金額・ID などは出さない
  */
 import "dotenv/config";
@@ -54,9 +56,13 @@ import { PASSKEY_ERRORS } from "@/lib/passkey";
 import { createPrismaClient } from "@/lib/prisma";
 import { PRESET_CATEGORIES, seedUserPresets } from "@/lib/seed";
 import type { UserId } from "@/lib/user-id";
-import { createUserWithPresets } from "@/lib/users";
+import { createUserWithPasskey, createUserWithPresets } from "@/lib/users";
+import { generateWebauthnUserId } from "@/lib/webauthn-user-id";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
+
+/** 7. のサインアップで SignupEvent に記録する ipHash。後片付けでこの値の行だけを消す */
+const CHECK_IP_HASH = "data-isolation-check";
 
 const YEAR_MONTH = "2026-09";
 const EXPENSE_DATE = "2026-09-10";
@@ -153,9 +159,9 @@ function expenseInput(categoryId: string, paymentSourceId: string, storeName: st
 
 async function run(prisma: PrismaClient, createdUserIds: string[]): Promise<void> {
   // ---- 1. ユニーク制約がユーザー単位 ----
-  const userA = await createUserWithPresets(prisma);
+  const userA = await createUserWithPresets(prisma, generateWebauthnUserId());
   createdUserIds.push(userA);
-  const userB = await createUserWithPresets(prisma);
+  const userB = await createUserWithPresets(prisma, generateWebauthnUserId());
   createdUserIds.push(userB);
 
   await check("1. A・B とも createUserWithPresets でき、同名のカテゴリ・払い出し先を持てる", async () => {
@@ -493,6 +499,74 @@ async function run(prisma: PrismaClient, createdUserIds: string[]): Promise<void
       (await snapshot(prisma, userB)) === bBeforeDelete
     );
   });
+
+  // ---- 7. サインアップのトランザクション（docs/steps/pub-2.md 設計判断 2・5） ----
+  const signupCredentialId = `data-isolation-check-signup-${Date.now()}`;
+  const signupCredential = {
+    credentialId: signupCredentialId,
+    publicKey: new Uint8Array([4, 5, 6]),
+    counter: 0,
+    transports: [],
+    deviceName: "端末C",
+  };
+
+  await check("7a. createUserWithPasskey でユーザー・プリセット・資格情報・SignupEvent が1件ずつ作られる", async () => {
+    const eventsBefore = await prisma.signupEvent.count({ where: { ipHash: CHECK_IP_HASH } });
+    const result = await createUserWithPasskey(prisma, {
+      webauthnUserId: generateWebauthnUserId(),
+      credential: signupCredential,
+      ipHash: CHECK_IP_HASH,
+    });
+    if (!result.ok) return false;
+    createdUserIds.push(result.userId);
+    const [categories, sources, credentials, eventsAfter] = await Promise.all([
+      prisma.category.count({ where: { userId: result.userId } }),
+      prisma.paymentSource.count({ where: { userId: result.userId } }),
+      prisma.credential.count({ where: { userId: result.userId } }),
+      prisma.signupEvent.count({ where: { ipHash: CHECK_IP_HASH } }),
+    ]);
+    return (
+      categories === PRESET_CATEGORIES.length &&
+      sources === 1 &&
+      credentials === 1 &&
+      eventsAfter === eventsBefore + 1
+    );
+  });
+
+  await check("7b. 資格情報IDが重複すると duplicate になり、ユーザー・プリセット・SignupEvent が1件も増えない", async () => {
+    const [usersBefore, categoriesBefore, eventsBefore] = await Promise.all([
+      prisma.user.count(),
+      prisma.category.count(),
+      prisma.signupEvent.count(),
+    ]);
+    const result = await createUserWithPasskey(prisma, {
+      webauthnUserId: generateWebauthnUserId(),
+      credential: signupCredential,
+      ipHash: CHECK_IP_HASH,
+    });
+    if (result.ok) createdUserIds.push(result.userId);
+    const [usersAfter, categoriesAfter, eventsAfter] = await Promise.all([
+      prisma.user.count(),
+      prisma.category.count(),
+      prisma.signupEvent.count(),
+    ]);
+    return (
+      !result.ok &&
+      result.reason === "duplicate" &&
+      usersAfter === usersBefore &&
+      categoriesAfter === categoriesBefore &&
+      eventsAfter === eventsBefore
+    );
+  });
+
+  await check("7c. webauthnUserId が同じユーザーは作れない（一意）", async () => {
+    const webauthnUserId = generateWebauthnUserId();
+    const first = await createUserWithPresets(prisma, webauthnUserId);
+    createdUserIds.push(first);
+    const usersBefore = await prisma.user.count();
+    const rejected = await rejects(() => createUserWithPresets(prisma, webauthnUserId));
+    return rejected && (await prisma.user.count()) === usersBefore;
+  });
 }
 
 async function main(): Promise<number> {
@@ -530,6 +604,12 @@ async function main(): Promise<number> {
       if (createdUserIds.length > 0) {
         await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
       }
+      // SignupEvent は userId を持たずカスケードで消えないので、専用の ipHash で消す
+      await prisma.signupEvent.deleteMany({ where: { ipHash: CHECK_IP_HASH } });
+      record(
+        "後片付け: このスクリプトの SignupEvent が残っていない",
+        (await prisma.signupEvent.count({ where: { ipHash: CHECK_IP_HASH } })) === 0,
+      );
       const remaining = await Promise.all(createdUserIds.map((id) => countRows(prisma, id)));
       record(
         "後片付け: 作成したユーザーとその全行が残っていない",
