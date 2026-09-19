@@ -218,3 +218,37 @@ Chrome で `http://localhost:3000` を開き、**DevTools の Console を開い�
 - `src/` にインラインの `style` を置かない
 - その他のヘッダーは `next.config.ts`。`Referrer-Policy` は `strict-origin-when-cross-origin`（`no-referrer` は Server Actions を壊しうる）
 - CSP は強制モードで出し、違反の報告の受け口は持たない
+
+---
+
+## 実装完了後の引き継ぎ（tester 向け）
+
+実装はコミット `6d2c9bd`。以下は implementer の完了レポートの要約。**シグネチャの正は実装のコード**なので、ずれていたらコードを読むこと。
+
+### モジュール構成
+
+| ファイル | 担当 |
+|---|---|
+| `src/lib/csp.ts` | `CSP_HEADER_NAME` / `NONCE_HEADER_NAME`（`"x-nonce"`）/ `NONCE_BYTES = 16`。`isValidNonce(nonce)`（標準 base64 で22文字以上、`/^[A-Za-z0-9+/]{22,}={0,2}$/`）、`generateNonce()`（`crypto.getRandomValues` 16バイト → `btoa`、24文字）、`isDevelopmentEnv(nodeEnv)`（`=== "development"` のときだけ true）、`buildContentSecurityPolicy({ nonce, isDev })`（純粋関数。不正な nonce は例外。項目は `"; "` 区切り、末尾に `;` 無し） |
+| `src/proxy.ts` | シグネチャと `matcher` は不変。冒頭で nonce と CSP を作る。通す分岐（公開パス・セッションあり）はリクエストヘッダに `x-nonce` と CSP を入れ、レスポンスにも CSP。リダイレクトの分岐（改竄 Cookie の削除を含む）はレスポンスに CSP |
+| `next.config.ts` | `poweredByHeader: false`。`headers()` は `/:path*` の1項目で、X-Robots-Tag → HSTS → X-Content-Type-Options → X-Frame-Options → Referrer-Policy → Permissions-Policy → COOP の順 |
+| `src/app/dashboard-progress-list.tsx` | `DashboardProgressBar` の props は不変。DOM は `div[aria-hidden="true"] > svg > rect[width="N%"]`（N は `getUsageBarPercent`）。色は `fill-*` |
+| `src/app/layout.tsx` | `await connection()` で全ページを動的に（RootLayout が async に） |
+| `src/app/not-found.tsx` | 自前の 404 画面（「ページが見つかりません」と `/` へのリンク）。既定の 404 画面がインラインの style と nonce 無しの `<style>` を使うため |
+
+### ポリシーの全文
+
+- 本番: `default-src 'self'; script-src 'self' 'nonce-<n>' 'strict-dynamic'; style-src 'self' 'nonce-<n>'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`
+- 開発: `script-src` に `'unsafe-eval'` を足し、**`style-src` は `'self' 'unsafe-inline'`（nonce を外す）**。nonce があるとブラウザが `'unsafe-inline'` を無視するため（公式の Development Environment 節と同じ形）
+
+### 仕様から補足・判断した点
+
+- 開発の `style-src` の形（上記）。設計判断 2 の「足す」から変えた
+- 自前の 404 画面を足した
+- 既定の `global-error` は置き換えていない（持ち越し）
+
+### 実装完了時点のテスト結果
+
+`Tests 4 failed | 2731 passed (2735)`:
+`tests/next-config.test.ts`（ヘッダー配列を丸ごと `toEqual`）、
+`tests/app/dashboard-progress-list.test.tsx` の3件（`[aria-hidden="true"] > div` の `style.width` を読んでいる。`svg rect` の `width` 属性を見る形にする）。`tests/proxy.test.ts` は全件成功。
